@@ -1,0 +1,73 @@
+{
+  "os": "Windows",
+  "pytorch": "2.9.1+cu128",
+  "pytorch_cuda": "12.8",
+  "requested_device": "cuda",
+  "cuda_available": true,
+  "gpu": "NVIDIA GeForce RTX 5080",
+  "compute_capability": [
+    12,
+    0
+  ],
+  "bf16_supported": true,
+  "formats": {
+    "fp8_e4m3": {
+      "dtype_present": true,
+      "reference_backend_implemented": true,
+      "native_linear_integration": true,
+      "accelerated_quant_gemm_implemented": false,
+      "hardware_candidate_only": true,
+      "tensor_conversion_verified": true,
+      "probe_error": null,
+      "status": "reference_only"
+    },
+    "fp8_e5m2": {
+      "dtype_present": true,
+      "reference_backend_implemented": true,
+      "native_linear_integration": true,
+      "accelerated_quant_gemm_implemented": false,
+      "hardware_candidate_only": true,
+      "tensor_conversion_verified": true,
+      "probe_error": null,
+      "status": "reference_only"
+    },
+    "mxfp8": {
+      "dtype_present": false,
+      "reference_backend_implemented": false,
+      "native_linear_integration": false,
+      "accelerated_quant_gemm_implemented": false,
+      "hardware_candidate_only": true,
+      "tensor_conversion_verified": null,
+      "probe_error": null,
+      "status": "reserved"
+    },
+    "nvfp4": {
+      "dtype_present": true,
+      "reference_backend_implemented": false,
+      "native_linear_integration": false,
+      "accelerated_quant_gemm_implemented": false,
+      "hardware_candidate_only": true,
+      "tensor_conversion_verified": null,
+      "probe_error": null,
+      "status": "reserved"
+    },
+    "int8": {
+      "reference_backend_implemented": true,
+      "native_linear_integration": true,
+      "accelerated_quant_gemm_implemented": false,
+      "status": "reference_only"
+    },
+    "int4": {
+      "reference_backend_implemented": true,
+      "native_linear_integration": true,
+      "accelerated_quant_gemm_implemented": false,
+      "status": "reference_only"
+    }
+  },
+  "tf32": {
+    "kind": "fp32_gemm_policy",
+    "weight_storage_format": false,
+    "allow_tf32": false
+  },
+  "note": "GPU architecture/dtype presence do not prove Windows low-precision GEMM support. FP8 reference is weight-only, not W8A8. NVFP4/MXFP8 are not implemented."
+}

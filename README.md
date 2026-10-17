@@ -10,12 +10,15 @@
 - [阶段 03：原生 Qwen3 Forward、Paged Decode 与 Windows 适配](reports/STAGE_03_NATIVE_QWEN3_AND_WINDOWS.md)
 - [阶段 04：Windows CUDA Paged Attention](reports/STAGE_04_WINDOWS_CUDA_PAGED_ATTENTION.md)
 - [阶段 05：CUDA Paged Attention Benchmark](reports/STAGE_05_CUDA_KERNEL_BENCHMARK.md)
+- [阶段 06：INT4、FP8 与 NVIDIA 精度能力矩阵](reports/STAGE_06_QUANTIZATION_PRECISION_BACKENDS.md)
 
 - continuous batching 的请求调度器；
 - 固定大小 Paged KV block allocator；
 - 物理 KV Cache tensor pool，支持跨 block 写入、逻辑 gather 和按 block 清理；
 - PyTorch fallback 的 RMSNorm、RoPE、SwiGLU 和 paged attention；
 - 可插拔的浮点和参考 W8A16 后端；
+- native Qwen3 decoder projection 的 INT8、packed INT4、FP8 E4M3/E5M2 reference 后端；
+- NVIDIA FP8/NVFP4/MXFP8 能力报告，明确区分 reference、reserved 和 CUDA 加速状态；
 - 可选的 Transformers Qwen3 reference runner。
 - 原生 Qwen3 forward：SDPA prefill + 项目 KV Cache paged decode。
 - 参考版 prefill + `past_key_values` 单 token 增量生成，以及 TTFT/TPOT 统计。

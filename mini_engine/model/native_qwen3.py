@@ -139,6 +139,7 @@ class NativeQwen3(nn.Module):
         if decode_backend not in {"torch", "cuda"}:
             raise ValueError("decode backend must be torch or cuda")
         self.decode_backend = decode_backend
+        self.quantization_report = None
         self.model = Qwen3Backbone(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         if config.tie_word_embeddings:
@@ -152,6 +153,10 @@ class NativeQwen3(nn.Module):
             model = cls(config, prefill_backend, decode_backend)
         model.load_state_dict(reference.state_dict(), strict=True, assign=True)
         return model.eval()
+
+    def quantize(self, config):
+        from ..quantization.linear import quantize_model_linears
+        return quantize_model_linears(self, config)
 
     def create_cache(self, num_blocks, block_size):
         weight = self.model.embed_tokens.weight

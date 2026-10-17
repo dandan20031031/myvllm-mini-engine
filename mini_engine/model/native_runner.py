@@ -23,9 +23,13 @@ class NativeQwen3Runner:
 
     @classmethod
     def from_pretrained(cls, path, *, device="cuda", dtype=torch.bfloat16, prefill_backend="auto", decode_backend="torch",
-                        num_blocks=256, block_size=16, enable_thinking=False, local_files_only=False):
+                        num_blocks=256, block_size=16, enable_thinking=False, local_files_only=False,
+                        quantization=None):
         from ..runtime import configure_local_cache
         configure_local_cache()
+        if quantization is not None:
+            from ..quantization import create_backend
+            create_backend(quantization)  # Reject unavailable formats before downloading weights.
         if decode_backend == "cuda":
             if not str(device).startswith("cuda") or dtype not in (torch.float16, torch.bfloat16):
                 raise ValueError("CUDA decode requires CUDA device and FP16/BF16 weights")
@@ -40,6 +44,8 @@ class NativeQwen3Runner:
         native = NativeQwen3.from_hf_model(reference, prefill_backend, decode_backend)
         stop_ids = reference.generation_config.eos_token_id
         del reference
+        if quantization is not None:
+            native.quantize(quantization)
         return cls(native, tokenizer, num_blocks=num_blocks, block_size=block_size,
                    enable_thinking=enable_thinking, eos_token_ids=stop_ids)
 
