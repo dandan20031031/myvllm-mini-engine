@@ -22,7 +22,7 @@ class NativeQwen3Runner:
         self.last_backend = model.decode_backend
 
     @classmethod
-    def from_pretrained(cls, path, *, device="cuda", dtype=torch.bfloat16, prefill_backend="auto", decode_backend="torch",
+    def from_pretrained(cls, path, *, device="cuda", dtype=torch.bfloat16, prefill_backend="auto", decode_backend="torch", elementwise_backend="torch",
                         num_blocks=256, block_size=16, enable_thinking=False, local_files_only=False,
                         quantization=None):
         from ..runtime import configure_local_cache
@@ -35,13 +35,18 @@ class NativeQwen3Runner:
                 raise ValueError("CUDA decode requires CUDA device and FP16/BF16 weights")
             from ..kernels.cuda_extension import load_cuda_extension
             load_cuda_extension()  # compile/load before any token timing
+        if elementwise_backend == "cuda":
+            if not str(device).startswith("cuda") or dtype not in (torch.float16, torch.bfloat16):
+                raise ValueError("CUDA elementwise kernels require CUDA device and FP16/BF16 weights")
+            from ..kernels.cuda_extension import load_cuda_extension
+            load_cuda_extension()
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=local_files_only)
         reference = AutoModelForCausalLM.from_pretrained(
             path, torch_dtype=dtype, local_files_only=local_files_only,
         ).to(device).eval()
-        native = NativeQwen3.from_hf_model(reference, prefill_backend, decode_backend)
+        native = NativeQwen3.from_hf_model(reference, prefill_backend, decode_backend, elementwise_backend)
         stop_ids = reference.generation_config.eos_token_id
         del reference
         if quantization is not None:

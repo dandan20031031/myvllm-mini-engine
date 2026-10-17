@@ -43,7 +43,7 @@ def load_cuda_extension(verbose=False):
     source = Path(__file__).parent / "csrc"
     return load(
         name="miniqwen_paged_attention",
-        sources=[str(source / "bindings.cpp"), str(source / "paged_attention.cu")],
+        sources=[str(source / "bindings.cpp"), str(source / "paged_attention.cu"), str(source / "elementwise.cu")],
         build_directory=str(build),
         extra_cflags=["/O2", "/utf-8", "/Zc:preprocessor"] if sys.platform == "win32" else ["-O3"],
         extra_cuda_cflags=["-O3", "--expt-relaxed-constexpr", "-lineinfo"]

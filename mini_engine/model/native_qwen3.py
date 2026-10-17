@@ -10,7 +10,8 @@ import torch
 from torch import nn
 
 from ..cache import KVCachePool
-from ..kernels.fallback import apply_rope, rms_norm, silu_and_mul
+from ..kernels.fallback import apply_rope
+from ..kernels.elementwise import residual_add, residual_rms_norm, rms_norm, silu_and_mul
 from ..kernels.paged import paged_attention
 from ..kernels.prefill import prefill_attention
 
@@ -54,25 +55,26 @@ class Qwen3Config:
 
 
 class RMSNorm(nn.Module):
-    def __init__(self, size, eps):
+    def __init__(self, size, eps, backend="torch"):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(size))
         self.eps = eps
+        self.backend = backend
 
     def forward(self, x):
-        return rms_norm(x, self.weight, self.eps)
+        return rms_norm(x, self.weight, self.eps, backend=self.backend)
 
 
 class Attention(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, elementwise_backend="torch"):
         super().__init__()
         self.config = config
         self.q_proj = nn.Linear(config.hidden_size, config.num_attention_heads * config.head_dim, bias=config.attention_bias)
         self.k_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * config.head_dim, bias=config.attention_bias)
         self.v_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * config.head_dim, bias=config.attention_bias)
         self.o_proj = nn.Linear(config.num_attention_heads * config.head_dim, config.hidden_size, bias=config.attention_bias)
-        self.q_norm = RMSNorm(config.head_dim, config.rms_norm_eps)
-        self.k_norm = RMSNorm(config.head_dim, config.rms_norm_eps)
+        self.q_norm = RMSNorm(config.head_dim, config.rms_norm_eps, elementwise_backend)
+        self.k_norm = RMSNorm(config.head_dim, config.rms_norm_eps, elementwise_backend)
 
     def forward(self, x, cos, sin, cache, block_ids, position, layer, backend, decode_backend):
         cfg = self.config
@@ -98,39 +100,45 @@ class Attention(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, elementwise_backend="torch"):
         super().__init__()
         self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
         self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
         self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
+        self.elementwise_backend = elementwise_backend
 
     def forward(self, x):
-        return self.down_proj(silu_and_mul(self.gate_proj(x), self.up_proj(x)))
+        return self.down_proj(silu_and_mul(self.gate_proj(x), self.up_proj(x), backend=self.elementwise_backend))
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, elementwise_backend="torch"):
         super().__init__()
-        self.self_attn = Attention(config)
-        self.mlp = MLP(config)
-        self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.elementwise_backend = elementwise_backend
+        self.self_attn = Attention(config, elementwise_backend)
+        self.mlp = MLP(config, elementwise_backend)
+        self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps, elementwise_backend)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps, elementwise_backend)
 
     def forward(self, x, *args):
-        x = x + self.self_attn(self.input_layernorm(x), *args)
-        return x + self.mlp(self.post_attention_layernorm(x))
+        attention = self.self_attn(self.input_layernorm(x), *args)
+        normalized, summed = residual_rms_norm(
+            attention, x, self.post_attention_layernorm.weight,
+            self.post_attention_layernorm.eps, backend=self.elementwise_backend,
+        )
+        return residual_add(summed, self.mlp(normalized), backend=self.elementwise_backend)
 
 
 class Qwen3Backbone(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, elementwise_backend="torch"):
         super().__init__()
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList([DecoderLayer(config) for _ in range(config.num_hidden_layers)])
-        self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.layers = nn.ModuleList([DecoderLayer(config, elementwise_backend) for _ in range(config.num_hidden_layers)])
+        self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps, elementwise_backend)
 
 
 class NativeQwen3(nn.Module):
-    def __init__(self, config: Qwen3Config, prefill_backend="auto", decode_backend="torch"):
+    def __init__(self, config: Qwen3Config, prefill_backend="auto", decode_backend="torch", elementwise_backend="torch"):
         super().__init__()
         self.config = config
         if prefill_backend not in {"auto", "flash", "math"}:
@@ -139,18 +147,21 @@ class NativeQwen3(nn.Module):
         if decode_backend not in {"torch", "cuda"}:
             raise ValueError("decode backend must be torch or cuda")
         self.decode_backend = decode_backend
+        if elementwise_backend not in {"torch", "cuda"}:
+            raise ValueError("elementwise backend must be torch or cuda")
+        self.elementwise_backend = elementwise_backend
         self.quantization_report = None
-        self.model = Qwen3Backbone(config)
+        self.model = Qwen3Backbone(config, elementwise_backend)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
     @classmethod
-    def from_hf_model(cls, reference, prefill_backend="auto", decode_backend="torch"):
+    def from_hf_model(cls, reference, prefill_backend="auto", decode_backend="torch", elementwise_backend="torch"):
         config = Qwen3Config.from_hf(reference.config)
         # Reuse loaded storage instead of allocating a second 0.6B weight copy.
         with torch.device("meta"):
-            model = cls(config, prefill_backend, decode_backend)
+            model = cls(config, prefill_backend, decode_backend, elementwise_backend)
         model.load_state_dict(reference.state_dict(), strict=True, assign=True)
         return model.eval()
 

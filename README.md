@@ -11,6 +11,7 @@
 - [阶段 04：Windows CUDA Paged Attention](reports/STAGE_04_WINDOWS_CUDA_PAGED_ATTENTION.md)
 - [阶段 05：CUDA Paged Attention Benchmark](reports/STAGE_05_CUDA_KERNEL_BENCHMARK.md)
 - [阶段 06：INT4、FP8 与 NVIDIA 精度能力矩阵](reports/STAGE_06_QUANTIZATION_PRECISION_BACKENDS.md)
+- [阶段 07：Windows CUDA RMSNorm、Residual 与 SwiGLU](reports/STAGE_07_CUDA_ELEMENTWISE.md)
 
 - continuous batching 的请求调度器；
 - 固定大小 Paged KV block allocator；
@@ -21,6 +22,7 @@
 - NVIDIA FP8/NVFP4/MXFP8 能力报告，明确区分 reference、reserved 和 CUDA 加速状态；
 - 可选的 Transformers Qwen3 reference runner。
 - 原生 Qwen3 forward：SDPA prefill + 项目 KV Cache paged decode。
+- 可选 CUDA elementwise：全部 RMSNorm、融合 attention residual + post norm、MLP residual add 和 SwiGLU。
 - 参考版 prefill + `past_key_values` 单 token 增量生成，以及 TTFT/TPOT 统计。
 - backend-agnostic benchmark 工具，可统一记录延迟、吞吐和 CUDA 峰值显存。
 
@@ -152,3 +154,25 @@ $env:MINI_ENGINE_TEST_CUDA = "1"
 ```
 
 结果默认写入当前项目的 `benchmarks\results\paged_attention.json`。
+
+
+## CUDA Norm / Residual / SwiGLU
+
+~~~powershell
+. .\scripts\enter_project.ps1
+$env:MINI_ENGINE_TEST_CUDA = "1"
+.\.venv\Scripts\python -m pytest -q -o cache_dir=build/pytest_cache
+.\.venv\Scripts\python -m mini_engine --model "D:\models\Qwen3-0.6B" --prompt "介绍一下 KV Cache" --dtype bf16 --decode-backend cuda --elementwise-backend cuda --local-files-only
+~~~
+
+--elementwise-backend cuda 在 prefill/decode 都启用自研 FP16/BF16 norm、residual 和 SiLU×Up；
+默认 torch 保留参考路径。RMSNorm 输入须连续；算子是 inference-only，不提供 backward。
+
+单算子 benchmark：
+
+~~~powershell
+.\.venv\Scripts\python benchmarks\benchmark_elementwise.py --dtype bf16
+~~~
+
+同时输出 CUDA Graph device timeline 和 eager wall time，含精度检查；结果保存在 benchmarks/results。
+独立 residual add 尚未测得优于 PyTorch 的收益。完整 0.6B 权重和端到端性能仍待验收。

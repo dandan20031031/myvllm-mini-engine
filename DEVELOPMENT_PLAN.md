@@ -1,155 +1,124 @@
 # MiniQwenEngine 开发方案
 
-## 项目目标
+本文件是当前开发约定；路线变化同步更新，历史阶段报告保留当时状态。
 
-MiniQwenEngine 是一个面向单 GPU 的小型语言模型推理引擎，第一阶段聚焦 Qwen3-0.6B。项目借鉴 MiniVLLM/vLLM 的请求调度和分页 KV Cache 思路，同时保留清晰的 PyTorch fallback，后续逐步替换为自研 CUDA 算子。
+## 1. 项目目标和约束
 
-第一阶段的竞争力来自一个明确的优化目标：在 Qwen3-0.6B 的 decode 阶段，结合 Paged KV Cache、continuous batching 和多精度 KV Cache，降低显存占用与每 token 延迟。
+面向 Qwen3-0.6B 实现单 GPU 推理引擎，重点是自研 CUDA、Paged KV Cache、多精度和可复现实验。先控制模型与分布式范围，再逐项提高性能。
 
-## 范围与取舍
+- Windows 11 原生，PowerShell + MSVC + nvcc；不依赖 Linux、WSL、Triton。
+- 项目源码、.venv、模型、编译输出、临时文件及可配置缓存均放在当前 D 盘项目目录。
+- Transformers 负责加载和正确性参考；native forward 和缓存由项目实现。
+- 第一版不做多 GPU、多模型通用适配；投机解码留待基础推理稳定后评估。
+- 每阶段完成必要测试、代码解读报告、README/计划更新和本地 Git commit。
 
-### 第一阶段支持
+## 2. 架构与数据流
 
-- Qwen3-0.6B
-- 单 GPU
-- FP16/BF16
-- 单请求和 continuous batching
-- Paged KV Cache 的分配、回收和 block table
-- prefill/decode 状态分离
-- 流式 token 生成接口的基础抽象
-- PyTorch fallback 算子
-- 可插拔量化后端接口
-
-### 暂不支持
-
-- 多 GPU、张量并行、流水线并行
-- 多模型通用适配
-- 一开始同时实现 GPTQ、AWQ、FP8、INT4 全部格式
-- 自己实现 GEMM
-
-矩阵乘优先使用 PyTorch/cuBLASLt；自研 CUDA 优先放在 decode paged attention、RMSNorm、RoPE、SwiGLU 和 sampling。
-
-## 架构
-
-```text
-serving / CLI
-       |
+~~~text
+CLI / future HTTP
+        |
 LLMEngine -- Scheduler -- Request
-       |          |
-       |       BlockManager -- KVCache
-       |
-ModelRunner -- Qwen3 model -- QuantBackend
-       |
-Kernels: paged attention / rmsnorm / rope / swiglu / sampling
-```
+        |          |
+        |       BlockManager
+        |
+NativeQwen3Runner -- NativeQwen3 -- QuantBackend / ReferenceQuantLinear
+        |                    |
+    KVCachePool          CUDA kernels / PyTorch reference
+~~~
 
-目录职责：
+当前单请求 NativeQwen3Runner 自己持有 BlockManager 和 KVCachePool，尚未接到 Scheduler 的真实批量执行。不得把已有调度器骨架描述为已完成并发推理。
 
-```text
-mini_engine/
-  model/          Qwen3 配置和 Transformers runner
-  engine/         引擎、请求、调度器
-  cache/          block allocator 和 KV Cache 抽象
-  kernels/        PyTorch fallback，后续接 CUDA extension
-  quantization/   BF16、W8A16、W4A16 的后端接口
-  serving/        服务层预留
-tests/            不依赖模型下载的单元测试
-```
+KV 布局是 [layer, physical_block, token_in_block, kv_head, head_dim]。KV 精度当前与浮点模型一致；低精度权重不代表低精度 KV。
 
-## 迭代路线
+## 3. 全算子 CUDA 覆盖
 
-1. **模型基线**：加载 Qwen3-0.6B，支持 tokenizer、chat template、`enable_thinking=False`，与 Transformers 对齐。
-2. **增量解码**：完成 prefill/decode 分离和 KV Cache。
-3. **调度与分页缓存**：加入 waiting/running/finished 状态、continuous batching、block table 和显存回收。
-4. **CUDA 优化**：先 RMSNorm/RoPE，再 decode paged attention、fused SwiGLU、sampling，最后评估 CUDA Graph。
-5. **多精度**：先 W8A16，再 W4A16，最后做 BF16/INT8 KV Cache 的按压力选择。
+每一类推理算子都应有明确 CUDA 后端和独立正确性证据。保留 PyTorch reference。融合后不要求每个逻辑操作单独 launch。
 
-## 多精度设计
+| 模块 | 目标 | 截至阶段 07 的状态 |
+|---|---|---|
+| Embedding | 自研 CUDA gather | PyTorch |
+| Q/K/V/O projection | CUDA 库 GEMM/GEMV，评估形状专用优化 | 浮点 PyTorch Linear；可选低精度 reference |
+| Input/Post-attention/Final RMSNorm | 自研 CUDA reduction | 已集成，可选 torch/cuda |
+| Q/K head RMSNorm | 自研 CUDA | 已集成，可选 torch/cuda |
+| Residual add | 自研或融合 | Attention residual 与 post norm 融合；MLP 后独立 CUDA add |
+| RoPE/位置数据 | 自研 CUDA，复用位置数据 | PyTorch |
+| KV 写入 | CUDA scatter，与 RoPE 等融合 | PyTorch copy |
+| Prefill Attention | Windows Flash 风格 CUDA、保留 SDPA | SDPA；本机 Windows PyTorch 无 Flash backend |
+| Decode Attention | 自研 CUDA Paged Attention | FP16/BF16、GQA、split-KV 已实现 |
+| SwiGLU 的 SiLU×Up | 自研 fused CUDA | 已集成，包含对齐时的向量化读写 |
+| Gate/Up/Down projection | CUDA GEMM/低精度后端 | 浮点 PyTorch Linear；可选低精度 reference |
+| LM head | CUDA GEMM/GEMV | 浮点 PyTorch Linear |
+| Greedy/Temperature/Top-k/Top-p | 自研 CUDA sampling | PyTorch reference |
+| Pack/Dequant/Scale | CUDA + 对应格式 GEMM | INT8/INT4/FP8 reference |
 
-模型层只依赖 `QuantBackend` 接口，不直接依赖某种量化格式：
+矩阵乘先使用成熟 cuBLAS/cuBLASLt；按 profiling 评估 CUTLASS 或自研 GEMV/GEMM。所有 Linear 和 LM head 都纳入覆盖审计，但不把从零编写全部 GEMM 当作阶段前置条件。
 
-```python
-class QuantBackend:
-    def pack(self, weight): ...
-    def linear(self, x, packed_weight): ...
-```
+Tokenizer、HTTP、请求队列和 block 所有权由 CPU 处理。
 
-实现顺序为 BF16/FP16、W8A16、W4A16。embedding、norm、residual 和 lm_head 默认保留高精度，量化主要应用于 Linear。
+## 4. 多精度与 NVIDIA 格式
 
-## 主要创新点
+分别描述权重存储、激活、累加、KV 格式和实际计算后端。格式存在不等于 Tensor Core 加速。
 
-根据 batch size、上下文长度和显存压力选择 KV Cache 精度及 decode kernel：
+| 格式 | 当前状态 | 下一步 |
+|---|---|---|
+| FP32 | 正确性 reference | 保留 |
+| FP16/BF16 | 默认浮点及自研 kernel | 全算子覆盖 |
+| TF32 | FP32 GEMM 策略，尚未提供项目级开关 | 显式控制和记录，不视为存储量化 |
+| W8A16/W8A32 INT8 | per-channel 打包、FP32 scale、native Linear reference | fused dequant / CUDA GEMM |
+| W4A16/W4A32 INT4 | group-wise 两个 nibble/byte、native Linear reference | CUDA packing/dequant/GEMM |
+| FP8 E4M3FN/E5M2 | scaled weight-only reference、native Linear，非 W8A8 | 评估 FP8 Tensor Core GEMM、激活缩放 |
+| MXFP8 | reserved | 定义微缩放、布局、Windows 后端 |
+| NVFP4 | reserved | FP4 E2M1、块 scale 和额外 scale 策略、Windows CUDA GEMM |
+| FP8/INT8 KV | 未实现 | scale、写入和 paged attention 共同适配 |
 
-- 显存充足：BF16 KV Cache；
-- 显存压力较高：INT8 KV Cache；
-- 短序列、小 batch：低延迟 kernel；
-- 长序列、大 batch：高吞吐 kernel。
+RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证明 NVFP4 已可用。不能以 INT4 或普通 FP8 冒充 NVFP4/MXFP8。每种格式分别验收：接口、reference、CUDA kernel、模型集成、性能收益。
 
-## 验收与 benchmark
+当前 native 量化替换每层 Q/K/V/O、Gate/Up/Down 七类 projection，保留浮点 embedding、norm、residual、lm_head 和 KV。reference 每次先反量化为 FP32 再 linear，可能更慢，不宣称量化加速。
 
-至少比较 Transformers、MiniVLLM、PyTorch baseline 和自研 engine，记录 TTFT、TPOT、tokens/s、显存占用、最大并发数、P50/P95 延迟以及量化后的生成质量。每个 kernel 额外记录 CUDA event latency、有效带宽、occupancy 和 L2 命中率。
+## 5. 阶段状态
 
-## 当前实现状态
+| 阶段 | 交付内容 | 状态 |
+|---|---|---|
+| 00 | 配置、请求、调度和 block allocator | 完成 |
+| 01 | KV tensor pool、benchmark 基础 | 完成 |
+| 02 | Transformers 增量 reference | 完成 |
+| 03 | native Qwen3、自有 KV、Windows CLI | 完成 |
+| 04 | Windows CUDA Paged Attention | 完成 |
+| 05 | 单算子 benchmark 与 smoke 实测 | 完成 |
+| 06 | INT4/FP8 reference、native Linear、能力矩阵 | 完成 |
+| 07 | 所有 RMSNorm、Residual、SwiGLU CUDA，边界/模型/Graph 测试及单算子实测 | 完成 |
+| 08 | Embedding/RoPE/KV 写入 CUDA，复用 block table、减少每层同步 | 下一阶段 |
+| 09 | Windows Prefill Flash 风格 CUDA、在线 softmax/causal/GQA | 待实现 |
+| 10 | Linear/LM head CUDA 库后端、greedy 再 top-k/top-p；量化 GEMM 分项验收 | 待实现 |
+| 11 | 完整 Qwen3-0.6B 权重、profiling、质量和 TTFT/TPOT | 待验收；性能检查贯穿各阶段 |
+| 12 | scheduler 接通 model execution、continuous batching、HTTP/SSE、取消与异常回收 | 待实现 |
+| 13 | NVIDIA 低精度深化、可用的 NVFP4/MXFP8、低精度 KV | 待实现 |
+| 14 | Transformers、具体 MiniVLLM、vLLM 正式对比 | 待实现 |
 
-当前提交已经完成单请求 native Qwen3 增量 forward，并接入第一版 Windows CUDA Paged Attention 和单算子 benchmark：prefill 使用 PyTorch SDPA，decode 可选项目 CUDA kernel 或 PyTorch fallback，编译、缓存和 benchmark 产物位于项目 D 盘目录。下一步是根据 profiling 结果优化 kernel，再做 HTTP 服务、continuous batching model execution 和 vLLM benchmark。
+后续可按实测瓶颈调整算子顺序，并更新本文件。vLLM 不作为 Windows 引擎运行依赖；若比较环境使用不同 OS，必须披露差异，不能宣称严格同环境。
 
-## 路线修订：全算子 CUDA、NVIDIA 精度和阶段提交
+## 6. 正确性与性能验收
 
-本节依据用户最新要求修订；与前面的初始路线冲突时，以本节为准。
+- shape/dtype/device、非整齐维度、空 batch、page 边界与坏 metadata。
+- FP16/BF16 舍入点、FP32 reduction、小值和极值。
+- 当前 CUDA stream、算子 CUDA Graph capture/replay。
+- native logits 和 greedy，与 reference/Transformers 逐步对齐；量化需分开比较权重误差和缓存语义。
+- TTFT、TPOT、实际输出 tokens/s、显存、并发和分位数延迟；量化记录困惑度或固定任务质量。
+- 单算子记录 device timeline 和 eager wall time，端到端包含调度与同步；不混用口径。
+- 所有阶段生成 reports/STAGE_XX_*.md，解释每个模块、数据布局、调用链、测试结果、限制和下一阶段接口。
 
-### 运行和存储约束
+阶段 07 全量测试为 126 passed。新增 CUDA elementwise 50 项、fallback 2 项，另有前序 74 项回归。当前仅以随机张量、小型随机 Qwen3 验证，未完成完整 0.6B 模型质量和性能验收。
 
-- Windows 11 原生，PowerShell + MSVC + nvcc，不依赖 Linux、WSL 或 Triton。
-- 源码、虚拟环境、模型、构建输出、临时文件和可配置缓存均保存在当前 D 盘项目中。
-- 每类模型算子逐步接入明确的 CUDA 后端，保留 PyTorch reference 用于验证。Tokenizer、HTTP 和调度元数据仍由 CPU 处理。
+阶段 05 Event 测量可能包括 Python 调度空隙，reference 包含 gather/同步/循环，历史加速比不能视为纯 kernel 或相对 vLLM 的结论。阶段 07 同时报告 Graph 重放和 eager wall；Graph 时间也包含节点调度，不称作纯指令时间。
 
-### CUDA 覆盖清单
+算子 CUDA Graph 测试通过，不等于整个推理循环已支持 CUDA Graph。独立 residual add 在实测 shape 下略慢于 PyTorch，保留可选后端，后续以融合降低开销。
 
-- Embedding gather。
-- 所有 RMSNorm，包括 input、post-attention、final 和 Q/K head norm。
-- Residual add，可与 RMSNorm 融合。
-- RoPE、位置数据计算、KV Cache 写入，可组合融合。
-- Prefill 使用 Windows 可用的 Flash 风格 CUDA；现有 SDPA 保留为参考路径。
-- Decode 使用已实现的 CUDA Paged Attention，继续优化 GQA 和访存。
-- SwiGLU 的 SiLU 和逐元素乘法。
-- Q/K/V/O、Gate/Up/Down projection 和 LM head：明确使用 cuBLAS/cuBLASLt 等 CUDA GEMM/GEMV，按性能数据评估自研，不把每个 GEMM 从零实现作为前置条件。
-- Greedy、temperature、top-k、top-p sampling。
-- 量化 pack/dequant/scale 及格式对应的 CUDA GEMM。
+## 7. Git 工作流和存储
 
-融合后不要求每个逻辑算子单独 launch。必须区分自研 CUDA、调用 NVIDIA CUDA 库和 PyTorch reference 的覆盖情况。
-
-### 多精度路线
-
-- FP32：正确性参考；TF32：显式的 FP32 GEMM 计算策略，不作为权重存储量化格式。
-- FP16/BF16：浮点默认计算和自研 kernel 首版目标。
-- W8A16：保留现有 INT8 reference，后续接 fused dequant GEMM。
-- W4A16：先实现 group-wise packed INT4 reference，再接 CUDA 性能后端。
-- FP8 E4M3/E5M2：先实现 scaled reference，明确 scale、饱和和累加；再接硬件 FP8 GEMM。
-- MXFP8：单独设计微缩放格式，按硬件和 Windows 后端能力推进。
-- NVFP4：重点规划 NVIDIA FP4 E2M1 和块缩放及额外缩放策略；INT4 或存在 float4 dtype 不等于完整 NVFP4 支持。
-- FP8/INT8 KV Cache：需要一起适配 scale、写入和 paged attention 读取。
-
-分别记录权重存储、激活、累加、KV 格式及实际计算后端。每种格式分为接口预留、数值 reference、CUDA kernel、模型集成和性能验收五种状态。RTX 5080 的 SM 12.0 本身不保证所有库和 shape 可用，NVFP4/MXFP8 必须实际验证。当前新增格式尚未实现，不宣称可加速。
-
-### 后续阶段
-
-1. 阶段 06：精度接口和能力矩阵，packed INT4/FP8 reference，native Linear 可选集成；NVFP4/MXFP8 先明确接口及能力边界。
-2. 阶段 07：所有 Norm/Residual/SwiGLU CUDA。
-3. 阶段 08：Embedding/RoPE/KV 写入 CUDA，复用 GPU block table。
-4. 阶段 09：Windows Prefill Flash 风格 CUDA。
-5. 阶段 10：Linear/LM head CUDA 库后端和 sampling CUDA，逐精度验收。
-6. 阶段 11：完整 Qwen3-0.6B 权重生成验收、profiling、TTFT/TPOT 和实际输出计数；性能检查也贯穿前面阶段。
-7. 阶段 12：调度器接通 native model execution、continuous batching、HTTP/SSE 和取消/异常回收。
-8. 阶段 13：FP8/INT4 CUDA 深化、NVFP4/MXFP8 和低精度 KV。
-9. 阶段 14：Transformers、具体 MiniVLLM 和 vLLM 的正式对比。若 vLLM 使用其他 OS，明确记录环境差异；Windows 引擎不引入 vLLM 运行依赖。
-
-每阶段报告解读文件职责、调用链、数据布局、测试与限制，维护 README 索引。阶段 05 的 Event 计时可能包含 CPU 调度间隙；历史 speedup 只是相对带 Python 循环和 gather 的参考路径，不等于纯 kernel 或相对 vLLM 的加速。
-
-### Git 工作流
-
-- 当前 main 仓库已初始化，尚未提交，未配置 remote。
-- 阶段 00–05 保存为一个历史基线，不捏造早期的分阶段提交历史。
-- 从阶段 06 起：实现、测试、阶段报告、计划/README、diff 检查、stage、每阶段本地 commit。
-- 不提交虚拟环境、模型、缓存、编译产物或大体积 trace。
-- 使用已有提交身份；默认只做本地 commit，push 和远端创建按用户另外授权执行。
-- 测试失败不标记完成；权限阻塞时保留改动并记录未执行的动作。
+- 已初始化 main，未配置 remote；默认仅本地 commit，不自动 push。
+- d451ade：阶段 00–05 历史基线，不伪造早期分阶段历史。
+- 082fd64：阶段 06 INT4/FP8 reference。
+- 阶段 07 在测试、报告和计划检查完成后创建本地 commit；后续每阶段同样执行。
+- 使用已有提交身份，不擅改凭据或全局 Git 设置。
+- 不提交 .venv、模型、缓存、build 产物或大体积 trace；可在报告保存紧凑实测摘要。
+- 测试失败不标记阶段完成；执行受权限阻塞时保留改动并说明未执行的动作。

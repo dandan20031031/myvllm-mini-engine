@@ -1,8 +1,66 @@
 #include <torch/extension.h>
+#include <cmath>
+#include <limits>
+#include <vector>
 
 at::Tensor paged_attention_cuda(const at::Tensor& query, const at::Tensor& key,
     const at::Tensor& value, const at::Tensor& tables, const at::Tensor& lengths,
     int64_t block_size);
+
+at::Tensor rms_norm_cuda(const at::Tensor& x, const at::Tensor& weight, double eps);
+std::vector<at::Tensor> residual_rms_norm_cuda(const at::Tensor& x, const at::Tensor& residual,
+    const at::Tensor& weight, double eps);
+at::Tensor silu_and_mul_cuda(const at::Tensor& gate, const at::Tensor& up);
+
+at::Tensor residual_add_cuda(const at::Tensor& x, const at::Tensor& residual);
+
+void check_elementwise_tensor(const at::Tensor& x) {
+    TORCH_CHECK(x.is_cuda(), "elementwise inputs must be CUDA");
+    TORCH_CHECK(x.is_contiguous(), "elementwise inputs must be contiguous");
+    TORCH_CHECK(x.scalar_type() == at::kHalf || x.scalar_type() == at::kBFloat16, "elementwise requires FP16/BF16");
+    TORCH_CHECK(!at::GradMode::is_enabled() || !x.requires_grad(), "custom CUDA ops are inference-only; use inference_mode");
+}
+
+void check_pair(const at::Tensor& x, const at::Tensor& other) {
+    check_elementwise_tensor(x);
+    check_elementwise_tensor(other);
+    TORCH_CHECK(x.device() == other.device(), "elementwise inputs must be on the same CUDA device");
+    TORCH_CHECK(x.scalar_type() == other.scalar_type(), "elementwise dtype mismatch");
+    TORCH_CHECK(x.sizes() == other.sizes(), "elementwise shape mismatch");
+}
+
+void check_norm(const at::Tensor& x, const at::Tensor& weight, double eps) {
+    check_elementwise_tensor(x);
+    check_elementwise_tensor(weight);
+    TORCH_CHECK(x.dim() >= 1 && x.size(-1) > 0, "RMSNorm needs a nonempty last dimension");
+    TORCH_CHECK(x.device() == weight.device(), "weight must be on the same CUDA device");
+    TORCH_CHECK(weight.scalar_type() == x.scalar_type() && weight.dim() == 1 && weight.numel() == x.size(-1), "RMSNorm weight shape/dtype mismatch");
+    TORCH_CHECK(std::isfinite(eps) && eps > 0 && eps <= std::numeric_limits<float>::max()
+                && static_cast<float>(eps) > 0, "eps must be positive, finite and representable in FP32");
+    TORCH_CHECK(x.numel() / x.size(-1) <= 2147483647, "too many RMSNorm rows");
+}
+
+at::Tensor rms_norm_checked(const at::Tensor& x, const at::Tensor& weight, double eps) {
+    check_norm(x, weight, eps);
+    return rms_norm_cuda(x, weight, eps);
+}
+
+std::vector<at::Tensor> residual_rms_norm_checked(const at::Tensor& x, const at::Tensor& residual,
+    const at::Tensor& weight, double eps) {
+    check_norm(x, weight, eps);
+    check_pair(x, residual);
+    return residual_rms_norm_cuda(x, residual, weight, eps);
+}
+
+at::Tensor residual_add_checked(const at::Tensor& x, const at::Tensor& residual) {
+    check_pair(x, residual);
+    return residual_add_cuda(x, residual);
+}
+
+at::Tensor silu_and_mul_checked(const at::Tensor& gate, const at::Tensor& up) {
+    check_pair(gate, up);
+    return silu_and_mul_cuda(gate, up);
+}
 
 at::Tensor paged_attention(const at::Tensor& query, const at::Tensor& key,
     const at::Tensor& value, const at::Tensor& tables, const at::Tensor& lengths,
@@ -40,4 +98,8 @@ at::Tensor paged_attention(const at::Tensor& query, const at::Tensor& key,
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("paged_attention", &paged_attention, "FP16/BF16 split-KV paged decode attention");
+    m.def("rms_norm", &rms_norm_checked, "FP16/BF16 RMSNorm");
+    m.def("residual_rms_norm", &residual_rms_norm_checked, "FP16/BF16 residual RMSNorm");
+    m.def("silu_and_mul", &silu_and_mul_checked, "FP16/BF16 fused SiLU multiply");
+    m.def("residual_add", &residual_add_checked, "FP16/BF16 residual add");
 }

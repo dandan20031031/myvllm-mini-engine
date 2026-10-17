@@ -17,3 +17,16 @@ save_results([result], "benchmarks/results/example.json")
 ```
 
 端到端 benchmark 应固定模型版本、GPU、dtype、采样参数、prompt 数据和 `max_new_tokens`，并分别报告 TTFT、TPOT、吞吐量、显存峰值以及 P50/P95 延迟。
+
+
+## 阶段 07 elementwise 对比
+
+~~~powershell
+. .\scripts\enter_project.ps1
+.\.venv\Scripts\python benchmarks\benchmark_elementwise.py --dtype bf16
+.\.venv\Scripts\python benchmarks\benchmark_elementwise.py --dtype fp16 --output benchmarks\results\elementwise_fp16.json
+~~~
+
+默认以 rows=[1,128]、hidden=[1024,3072] 做笛卡尔积；4 类算子各先校验输出再测量。
+CUDA Graph Event timeline（32 调用/graph）降低 host 调度间隙；另保存 eager wall time，两种口径分开。
+Graph 时间仍包含节点调度，不能称为纯 kernel 指令延迟。脚本不测 tokens/s 或模型吞吐，也不比较 vLLM。
