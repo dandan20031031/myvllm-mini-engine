@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "miniqwen-engine"
+version = "0.1.0"
+description = "A small Qwen3-0.6B inference engine with paged KV cache foundations"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.5"]
+
+[project.optional-dependencies]
+model = ["transformers>=4.51,<5", "safetensors>=0.4"]
+dev = ["pytest>=8"]
+cuda = ["ninja>=1.11"]
+
+[tool.setuptools.package-data]
+"mini_engine.kernels" = ["csrc/*.cpp", "csrc/*.cu"]
+
+[tool.setuptools.packages.find]
+include = ["mini_engine*"]

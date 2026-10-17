@@ -1,0 +1,58 @@
+[
+  {
+    "package": "huggingface_hub",
+    "source": "C:\\Users\\123\\AppData\\Local\\pip\\cache\\http-v2\\4\\2\\d\\0\\6\\42d06d173e1f82d3695859a85244d3309fb98847555c9651a4b30d5a.body",
+    "destination": "D:\\dandan123\\dandan\\myvllm\\.cache\\pip\\http-v2\\4\\2\\d\\0\\6\\42d06d173e1f82d3695859a85244d3309fb98847555c9651a4b30d5a.body",
+    "bytes": 566395,
+    "sha256": "48F0C8EAC16145DFCE371E9D2D7772854A4F591BCB56C9CF548ACCF531D54270"
+  },
+  {
+    "package": "huggingface_hub",
+    "source": "C:\\Users\\123\\AppData\\Local\\pip\\cache\\http-v2\\4\\2\\d\\0\\6\\42d06d173e1f82d3695859a85244d3309fb98847555c9651a4b30d5a",
+    "destination": "D:\\dandan123\\dandan\\myvllm\\.cache\\pip\\http-v2\\4\\2\\d\\0\\6\\42d06d173e1f82d3695859a85244d3309fb98847555c9651a4b30d5a",
+    "bytes": 1210,
+    "sha256": "F301446149784491940F31186A8E15B2E334E1AF75589AA6FD37A952CD1A5F70"
+  },
+  {
+    "package": "tokenizers",
+    "source": "C:\\Users\\123\\AppData\\Local\\pip\\cache\\http-v2\\b\\7\\f\\7\\8\\b7f7861f8a32516814673fb56ef60567db3c901076de9bb8974ef2de.body",
+    "destination": "D:\\dandan123\\dandan\\myvllm\\.cache\\pip\\http-v2\\b\\7\\f\\7\\8\\b7f7861f8a32516814673fb56ef60567db3c901076de9bb8974ef2de.body",
+    "bytes": 2747786,
+    "sha256": "C9EA31EDFF2968B44A88F97D784C2F16DC0729B8B143ED004699EBCA91F05C48"
+  },
+  {
+    "package": "tokenizers",
+    "source": "C:\\Users\\123\\AppData\\Local\\pip\\cache\\http-v2\\b\\7\\f\\7\\8\\b7f7861f8a32516814673fb56ef60567db3c901076de9bb8974ef2de",
+    "destination": "D:\\dandan123\\dandan\\myvllm\\.cache\\pip\\http-v2\\b\\7\\f\\7\\8\\b7f7861f8a32516814673fb56ef60567db3c901076de9bb8974ef2de",
+    "bytes": 1210,
+    "sha256": "A3B0A558FF959E914941FA5C2F9953BE1126AECB895180170E940B772F7E0D79"
+  },
+  {
+    "package": "transformers",
+    "source": "C:\\Users\\123\\AppData\\Local\\pip\\cache\\http-v2\\c\\1\\2\\7\\e\\c127e0e02a423b5487d8b8db0b23e62b5808b225402cd75c2bef43b9.body",
+    "destination": "D:\\dandan123\\dandan\\myvllm\\.cache\\pip\\http-v2\\c\\1\\2\\7\\e\\c127e0e02a423b5487d8b8db0b23e62b5808b225402cd75c2bef43b9.body",
+    "bytes": 11993498,
+    "sha256": "4C9E9DE11333DDFE5114BC872C9F370509198ACF0B87A832A0AB9458E2BD0550"
+  },
+  {
+    "package": "transformers",
+    "source": "C:\\Users\\123\\AppData\\Local\\pip\\cache\\http-v2\\c\\1\\2\\7\\e\\c127e0e02a423b5487d8b8db0b23e62b5808b225402cd75c2bef43b9",
+    "destination": "D:\\dandan123\\dandan\\myvllm\\.cache\\pip\\http-v2\\c\\1\\2\\7\\e\\c127e0e02a423b5487d8b8db0b23e62b5808b225402cd75c2bef43b9",
+    "bytes": 1213,
+    "sha256": "660CCFE41253FEE9ED56780BBBDB4A49CC543014E8EB677D399798399B123CFC"
+  },
+  {
+    "package": "ninja",
+    "source": "C:\\Users\\123\\AppData\\Local\\pip\\cache\\http-v2\\f\\f\\6\\8\\1\\ff681f01df1f663df9a621d53e4acaafc3a71407db022b66e13c8a6c.body",
+    "destination": "D:\\dandan123\\dandan\\myvllm\\.cache\\pip\\http-v2\\f\\f\\6\\8\\1\\ff681f01df1f663df9a621d53e4acaafc3a71407db022b66e13c8a6c.body",
+    "bytes": 311798,
+    "sha256": "1293F4078278B70D0EE4B6CC8F3A9E030656C9B2F59909970343C4FE76070118"
+  },
+  {
+    "package": "ninja",
+    "source": "C:\\Users\\123\\AppData\\Local\\pip\\cache\\http-v2\\f\\f\\6\\8\\1\\ff681f01df1f663df9a621d53e4acaafc3a71407db022b66e13c8a6c",
+    "destination": "D:\\dandan123\\dandan\\myvllm\\.cache\\pip\\http-v2\\f\\f\\6\\8\\1\\ff681f01df1f663df9a621d53e4acaafc3a71407db022b66e13c8a6c",
+    "bytes": 1187,
+    "sha256": "B2E336419D936A0A1E5A3FB015CAB9F3B0B44E0BA9CC25F3DB0A6F7472D43678"
+  }
+]
