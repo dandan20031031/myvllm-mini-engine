@@ -22,6 +22,7 @@ def main():
     parser.add_argument("--prefill-backend", choices=["auto", "flash", "math"], default="auto")
     parser.add_argument("--decode-backend", choices=["torch", "cuda"], default="torch")
     parser.add_argument("--elementwise-backend", choices=["torch", "cuda"], default="torch")
+    parser.add_argument("--data-backend", choices=["torch", "cuda"], default="torch")
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--thinking", action="store_true")
     parser.add_argument("--quantization", choices=["none", "int8", "int4", "fp8", "fp8_e4m3", "fp8_e5m2", "mxfp8", "nvfp4"], default="none")
@@ -31,6 +32,7 @@ def main():
     runner = NativeQwen3Runner.from_pretrained(
         args.model, device=args.device, dtype=dtype, prefill_backend=args.prefill_backend, decode_backend=args.decode_backend,
         elementwise_backend=args.elementwise_backend,
+        data_backend=args.data_backend,
         num_blocks=args.num_blocks, block_size=args.block_size,
         enable_thinking=args.thinking, local_files_only=args.local_files_only,
         quantization=None if args.quantization == "none" else QuantConfig(

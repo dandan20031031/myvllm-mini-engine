@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 from ..cache import KVCachePool
-from ..kernels.fallback import apply_rope
+from ..kernels.data import apply_rope as apply_rope_backend, embedding_lookup
 from ..kernels.elementwise import residual_add, residual_rms_norm, rms_norm, silu_and_mul
 from ..kernels.paged import paged_attention
 from ..kernels.prefill import prefill_attention
@@ -66,9 +66,10 @@ class RMSNorm(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, config, elementwise_backend="torch"):
+    def __init__(self, config, elementwise_backend="torch", data_backend="torch"):
         super().__init__()
         self.config = config
+        self.data_backend = data_backend
         self.q_proj = nn.Linear(config.hidden_size, config.num_attention_heads * config.head_dim, bias=config.attention_bias)
         self.k_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * config.head_dim, bias=config.attention_bias)
         self.v_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * config.head_dim, bias=config.attention_bias)
@@ -82,8 +83,13 @@ class Attention(nn.Module):
         q = self.q_norm(self.q_proj(x).view(length, cfg.num_attention_heads, cfg.head_dim))
         k = self.k_norm(self.k_proj(x).view(length, cfg.num_key_value_heads, cfg.head_dim))
         v = self.v_proj(x).view(length, cfg.num_key_value_heads, cfg.head_dim)
-        q, k = apply_rope(q, k, cos, sin)
-        cache.write(layer, block_ids, position, k, v)
+        rope_cos = cos.squeeze(1) if self.data_backend == "cuda" else cos
+        rope_sin = sin.squeeze(1) if self.data_backend == "cuda" else sin
+        q, k = apply_rope_backend(q, k, rope_cos, rope_sin, backend=self.data_backend)
+        if self.data_backend == "cuda":
+            cache.write_cuda(layer, block_ids, position, k, v, validate=False)
+        else:
+            cache.write(layer, block_ids, position, k, v)
         if position == 0:
             output = prefill_attention(
                 q.transpose(0, 1).unsqueeze(0), k.transpose(0, 1).unsqueeze(0),
@@ -112,10 +118,10 @@ class MLP(nn.Module):
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, config, elementwise_backend="torch"):
+    def __init__(self, config, elementwise_backend="torch", data_backend="torch"):
         super().__init__()
         self.elementwise_backend = elementwise_backend
-        self.self_attn = Attention(config, elementwise_backend)
+        self.self_attn = Attention(config, elementwise_backend, data_backend)
         self.mlp = MLP(config, elementwise_backend)
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps, elementwise_backend)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps, elementwise_backend)
@@ -130,15 +136,15 @@ class DecoderLayer(nn.Module):
 
 
 class Qwen3Backbone(nn.Module):
-    def __init__(self, config, elementwise_backend="torch"):
+    def __init__(self, config, elementwise_backend="torch", data_backend="torch"):
         super().__init__()
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList([DecoderLayer(config, elementwise_backend) for _ in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([DecoderLayer(config, elementwise_backend, data_backend) for _ in range(config.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps, elementwise_backend)
 
 
 class NativeQwen3(nn.Module):
-    def __init__(self, config: Qwen3Config, prefill_backend="auto", decode_backend="torch", elementwise_backend="torch"):
+    def __init__(self, config: Qwen3Config, prefill_backend="auto", decode_backend="torch", elementwise_backend="torch", data_backend="torch"):
         super().__init__()
         self.config = config
         if prefill_backend not in {"auto", "flash", "math"}:
@@ -150,18 +156,21 @@ class NativeQwen3(nn.Module):
         if elementwise_backend not in {"torch", "cuda"}:
             raise ValueError("elementwise backend must be torch or cuda")
         self.elementwise_backend = elementwise_backend
+        if data_backend not in {"torch", "cuda"}:
+            raise ValueError("data backend must be torch or cuda")
+        self.data_backend = data_backend
         self.quantization_report = None
-        self.model = Qwen3Backbone(config, elementwise_backend)
+        self.model = Qwen3Backbone(config, elementwise_backend, data_backend)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
     @classmethod
-    def from_hf_model(cls, reference, prefill_backend="auto", decode_backend="torch", elementwise_backend="torch"):
+    def from_hf_model(cls, reference, prefill_backend="auto", decode_backend="torch", elementwise_backend="torch", data_backend="torch"):
         config = Qwen3Config.from_hf(reference.config)
         # Reuse loaded storage instead of allocating a second 0.6B weight copy.
         with torch.device("meta"):
-            model = cls(config, prefill_backend, decode_backend, elementwise_backend)
+            model = cls(config, prefill_backend, decode_backend, elementwise_backend, data_backend)
         model.load_state_dict(reference.state_dict(), strict=True, assign=True)
         return model.eval()
 
@@ -194,7 +203,7 @@ class NativeQwen3(nn.Module):
         weight = self.model.embed_tokens.weight
         if cache.device != weight.device or cache.dtype != weight.dtype:
             raise ValueError("cache must match model device and dtype")
-        x = self.model.embed_tokens(input_ids.to(weight.device))
+        x = embedding_lookup(weight, input_ids.to(weight.device), backend=self.data_backend)
         inv_freq = 1.0 / (cfg.rope_theta ** (torch.arange(0, cfg.head_dim, 2, device=x.device).float() / cfg.head_dim))
         positions = torch.arange(position, position + x.shape[0], device=x.device).float()
         angles = positions[:, None] * inv_freq[None, :]

@@ -3,6 +3,13 @@
 #include <limits>
 #include <vector>
 
+at::Tensor embedding_lookup_cuda(const at::Tensor& weight, const at::Tensor& ids, bool validate);
+std::vector<at::Tensor> apply_rope_cuda(const at::Tensor& q, const at::Tensor& k,
+    const at::Tensor& cos, const at::Tensor& sin, bool validate);
+void write_kv_cache_cuda(const at::Tensor& key_cache, const at::Tensor& value_cache,
+    const at::Tensor& ids, int64_t offset, const at::Tensor& key, const at::Tensor& value,
+    int64_t block_size, bool validate);
+
 at::Tensor paged_attention_cuda(const at::Tensor& query, const at::Tensor& key,
     const at::Tensor& value, const at::Tensor& tables, const at::Tensor& lengths,
     int64_t block_size);
@@ -62,6 +69,49 @@ at::Tensor silu_and_mul_checked(const at::Tensor& gate, const at::Tensor& up) {
     return silu_and_mul_cuda(gate, up);
 }
 
+at::Tensor embedding_lookup_checked(const at::Tensor& weight, const at::Tensor& ids, bool validate) {
+    TORCH_CHECK(weight.is_cuda() && ids.is_cuda(), "embedding inputs must be CUDA");
+    TORCH_CHECK(weight.is_contiguous() && ids.is_contiguous(), "embedding inputs must be contiguous");
+    TORCH_CHECK(weight.dim() == 2 && ids.dim() == 1, "embedding expects weight [vocab, hidden] and ids [tokens]");
+    TORCH_CHECK(ids.scalar_type() == at::kLong, "embedding ids must be int64");
+    TORCH_CHECK(weight.scalar_type() == at::kHalf || weight.scalar_type() == at::kBFloat16 || weight.scalar_type() == at::kFloat,
+                "embedding supports FP32/FP16/BF16");
+    TORCH_CHECK(weight.size(0) > 0 && weight.size(1) > 0, "embedding weight must be nonempty");
+    return embedding_lookup_cuda(weight, ids, validate);
+}
+
+std::vector<at::Tensor> apply_rope_checked(const at::Tensor& q, const at::Tensor& k,
+    const at::Tensor& cos, const at::Tensor& sin, bool validate) {
+    for (const auto& t : {q, k, cos, sin}) {
+        TORCH_CHECK(t.is_cuda() && t.is_contiguous(), "RoPE inputs must be contiguous CUDA tensors");
+        TORCH_CHECK(t.device() == q.device(), "RoPE inputs must share a device");
+    }
+    TORCH_CHECK(q.dim() == 3 && k.dim() == 3 && q.size(0) == k.size(0) && q.size(2) == k.size(2), "RoPE Q/K shape mismatch");
+    TORCH_CHECK(cos.dim() == 2 && sin.sizes() == cos.sizes() && cos.size(0) == q.size(0) && cos.size(1) * 2 == q.size(2), "RoPE cos/sin shape mismatch");
+    TORCH_CHECK(q.scalar_type() == at::kHalf || q.scalar_type() == at::kBFloat16, "RoPE requires FP16/BF16 Q/K");
+    TORCH_CHECK(cos.scalar_type() == q.scalar_type() && sin.scalar_type() == q.scalar_type(), "RoPE dtype mismatch");
+    TORCH_CHECK(q.size(1) >= k.size(1) && q.size(1) % k.size(1) == 0, "RoPE GQA head mismatch");
+    return apply_rope_cuda(q, k, cos, sin, validate);
+}
+
+void write_kv_cache_checked(const at::Tensor& key_cache, const at::Tensor& value_cache,
+    const at::Tensor& ids, int64_t offset, const at::Tensor& key, const at::Tensor& value,
+    int64_t block_size, bool validate) {
+    for (const auto& t : {key_cache, value_cache, ids, key, value}) {
+        TORCH_CHECK(t.is_cuda() && t.is_contiguous(), "KV write inputs must be contiguous CUDA tensors");
+        TORCH_CHECK(t.device() == key_cache.device(), "KV write inputs must share a device");
+    }
+    TORCH_CHECK(key_cache.dim() == 4 && value_cache.sizes() == key_cache.sizes(), "cache shape mismatch");
+    TORCH_CHECK(key.dim() == 3 && value.sizes() == key.sizes(), "K/V shape mismatch");
+    TORCH_CHECK(ids.dim() == 1 && ids.scalar_type() == at::kLong, "block ids must be int64 [blocks]");
+    TORCH_CHECK(block_size > 0 && key_cache.size(1) == block_size, "block size mismatch");
+    TORCH_CHECK(key.size(1) == key_cache.size(2) && key.size(2) == key_cache.size(3), "K/V head shape mismatch");
+    TORCH_CHECK(key_cache.scalar_type() == at::kHalf || key_cache.scalar_type() == at::kBFloat16, "KV cache requires FP16/BF16");
+    TORCH_CHECK(key.scalar_type() == key_cache.scalar_type() && value.scalar_type() == key_cache.scalar_type(), "KV dtype mismatch");
+    TORCH_CHECK(offset >= 0 && offset + key.size(0) <= ids.size(0) * block_size, "KV write exceeds block table");
+    write_kv_cache_cuda(key_cache, value_cache, ids, offset, key, value, block_size, validate);
+}
+
 at::Tensor paged_attention(const at::Tensor& query, const at::Tensor& key,
     const at::Tensor& value, const at::Tensor& tables, const at::Tensor& lengths,
     int64_t block_size, bool validate) {
@@ -102,4 +152,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("residual_rms_norm", &residual_rms_norm_checked, "FP16/BF16 residual RMSNorm");
     m.def("silu_and_mul", &silu_and_mul_checked, "FP16/BF16 fused SiLU multiply");
     m.def("residual_add", &residual_add_checked, "FP16/BF16 residual add");
+    m.def("embedding_lookup", &embedding_lookup_checked, "FP32/FP16/BF16 embedding gather");
+    m.def("apply_rope", &apply_rope_checked, "FP16/BF16 rotary embedding");
+    m.def("write_kv_cache", &write_kv_cache_checked, "FP16/BF16 paged KV scatter");
 }

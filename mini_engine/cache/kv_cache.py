@@ -120,6 +120,30 @@ class KVCachePool:
             position += count
             remaining -= count
 
+    def write_cuda(
+        self,
+        layer: int,
+        block_ids: torch.Tensor | list[int],
+        token_offset: int,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        *,
+        validate: bool = True,
+    ) -> None:
+        """Write K/V with the CUDA scatter kernel across physical pages."""
+        if key.shape != value.shape or key.ndim != 3:
+            raise ValueError("key and value must both have shape [tokens, kv_heads, head_dim]")
+        if layer < 0 or layer >= self.shape.num_layers:
+            raise IndexError("layer out of range")
+        ids = self._block_ids(block_ids)
+        if token_offset < 0 or token_offset + key.shape[0] > ids.numel() * self.shape.block_size:
+            raise ValueError("write exceeds supplied block table capacity")
+        if key.device != self.device or value.device != self.device or key.dtype != self.dtype or value.dtype != self.dtype:
+            raise ValueError("CUDA KV write inputs must match cache device and dtype")
+        from ..kernels.data import write_kv_cache
+        write_kv_cache(self.key[layer], self.value[layer], ids, token_offset, key, value,
+                       self.shape.block_size, backend="cuda", validate=validate)
+
     def gather(
         self,
         layer: int,
