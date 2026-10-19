@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 from ..cache import KVCachePool
-from ..kernels.data import apply_rope as apply_rope_backend, embedding_lookup
+from ..kernels.data import apply_rope as apply_rope_backend, embedding_lookup, write_kv_cache_batch
 from ..kernels.elementwise import residual_add, residual_rms_norm, rms_norm, silu_and_mul
 from ..kernels.paged import paged_attention
 from ..kernels.prefill import prefill_attention
@@ -104,6 +104,26 @@ class Attention(nn.Module):
                                      cache.shape.block_size, backend=decode_backend, validate=False)
         return self.o_proj(output.reshape(length, -1))
 
+    def forward_decode_batch(self, x, cos, sin, cache, block_tables, positions, layer, decode_backend):
+        cfg = self.config
+        batch = x.shape[0]
+        q = self.q_norm(self.q_proj(x).view(batch, cfg.num_attention_heads, cfg.head_dim))
+        k = self.k_norm(self.k_proj(x).view(batch, cfg.num_key_value_heads, cfg.head_dim))
+        v = self.v_proj(x).view(batch, cfg.num_key_value_heads, cfg.head_dim)
+        rope_cos = cos if self.data_backend == "cuda" else cos.unsqueeze(1)
+        rope_sin = sin if self.data_backend == "cuda" else sin.unsqueeze(1)
+        q, k = apply_rope_backend(q, k, rope_cos, rope_sin, backend=self.data_backend)
+        write_kv_cache_batch(
+            cache.key[layer], cache.value[layer], block_tables, positions,
+            k, v, cache.shape.block_size, backend=self.data_backend, validate=False,
+        )
+        lengths = positions + 1
+        output = paged_attention(
+            q, cache.key[layer], cache.value[layer], block_tables, lengths,
+            cache.shape.block_size, backend=decode_backend, validate=False,
+        )
+        return self.o_proj(output.reshape(batch, -1))
+
 
 class MLP(nn.Module):
     def __init__(self, config, elementwise_backend="torch"):
@@ -128,6 +148,16 @@ class DecoderLayer(nn.Module):
 
     def forward(self, x, *args):
         attention = self.self_attn(self.input_layernorm(x), *args)
+        normalized, summed = residual_rms_norm(
+            attention, x, self.post_attention_layernorm.weight,
+            self.post_attention_layernorm.eps, backend=self.elementwise_backend,
+        )
+        return residual_add(summed, self.mlp(normalized), backend=self.elementwise_backend)
+
+    def forward_decode_batch(self, x, cos, sin, cache, block_tables, positions, layer, decode_backend):
+        attention = self.self_attn.forward_decode_batch(
+            self.input_layernorm(x), cos, sin, cache, block_tables, positions, layer, decode_backend
+        )
         normalized, summed = residual_rms_norm(
             attention, x, self.post_attention_layernorm.weight,
             self.post_attention_layernorm.eps, backend=self.elementwise_backend,
@@ -210,4 +240,29 @@ class NativeQwen3(nn.Module):
         cos, sin = angles.cos().to(x.dtype).unsqueeze(1), angles.sin().to(x.dtype).unsqueeze(1)
         for index, layer in enumerate(self.model.layers):
             x = layer(x, cos, sin, cache, block_ids, position, index, self.prefill_backend, self.decode_backend)
+        return self.lm_head(self.model.norm(x))
+
+    @torch.inference_mode()
+    def forward_decode_batch(self, input_ids, cache, block_tables, positions):
+        """Decode one token per request using one batched model step."""
+        if input_ids.ndim != 1 or input_ids.dtype != torch.long or input_ids.numel() == 0:
+            raise ValueError("input_ids must be a nonempty 1D int64 batch")
+        if positions.ndim != 1 or positions.shape != input_ids.shape or positions.dtype != torch.long:
+            raise ValueError("positions must be int64 with one value per request")
+        if block_tables.ndim != 2 or block_tables.shape[0] != input_ids.shape[0]:
+            raise ValueError("block_tables must be [batch, max_blocks]")
+        if bool((positions < 0).any()) or bool((positions + 1 > self.config.max_position_embeddings).any()):
+            raise ValueError("decode positions exceed model context")
+        cfg, shape = self.config, cache.shape
+        if (shape.num_layers, shape.num_kv_heads, shape.head_dim) != (cfg.num_hidden_layers, cfg.num_key_value_heads, cfg.head_dim):
+            raise ValueError("KV cache architecture mismatch")
+        weight = self.model.embed_tokens.weight
+        if cache.device != weight.device or cache.dtype != weight.dtype:
+            raise ValueError("cache must match model device and dtype")
+        x = embedding_lookup(weight, input_ids.to(weight.device), backend=self.data_backend)
+        inv_freq = 1.0 / (cfg.rope_theta ** (torch.arange(0, cfg.head_dim, 2, device=x.device).float() / cfg.head_dim))
+        angles = positions.to(device=x.device, dtype=torch.float32)[:, None] * inv_freq[None, :]
+        cos, sin = angles.cos().to(x.dtype), angles.sin().to(x.dtype)
+        for index, layer in enumerate(self.model.layers):
+            x = layer.forward_decode_batch(x, cos, sin, cache, block_tables, positions, index, self.decode_backend)
         return self.lm_head(self.model.norm(x))

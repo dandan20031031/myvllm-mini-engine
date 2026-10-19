@@ -125,7 +125,7 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 
 ## 8. 路线调整后的系统优先级
 
-阶段 08 已完成 Embedding、RoPE 和 KV 写入 CUDA，136 个测试通过。后续优先把已有 CUDA 算子贯通为系统能力：
+阶段 08 已完成 Embedding、RoPE 和 KV 写入 CUDA，136 个测试通过。阶段 09+10 已完成 batch decode runtime 和 Prefix block 生命周期，139 个测试通过。后续优先把已有 CUDA 算子贯通为系统能力：
 
 | 阶段 | 重点 |
 |---|---|
@@ -134,7 +134,7 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 | 11 | CUDA Graph decode，shape bucket 和固定 metadata |
 | 12 | Windows Prefill CUDA，在线 softmax/causal/GQA |
 | 13 | Linear/LM head 与 INT8/INT4/FP8 GEMM |
-| 14 | Windows API、SSE、本地 RAG/代码助手 |
+| 14 | Windows API、SSE、本地 RAG/代码助手（后置可选） |
 | 15 | 完整 Qwen3 benchmark，与 Transformers、具体 MiniVLLM、vLLM/SGLang/TensorRT-LLM 对比 |
 | 16 | 精度感知 KV、FP8/INT8 KV、NVFP4/MXFP8 能力和 prompt lookup/speculative decoding |
 

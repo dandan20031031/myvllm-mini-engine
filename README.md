@@ -13,6 +13,7 @@
 - [阶段 06：INT4、FP8 与 NVIDIA 精度能力矩阵](reports/STAGE_06_QUANTIZATION_PRECISION_BACKENDS.md)
 - [阶段 07：Windows CUDA RMSNorm、Residual 与 SwiGLU](reports/STAGE_07_CUDA_ELEMENTWISE.md)
 - [阶段 08：Windows CUDA Embedding、RoPE 与 Paged KV 写入](reports/STAGE_08_CUDA_DATA_MOVEMENT.md)
+- [阶段 09+10：Continuous Batching Runtime 与 Prefix Block Cache](reports/STAGE_09_10_BATCH_RUNTIME_PREFIX_CACHE.md)
 
 - continuous batching 的请求调度器；
 - 固定大小 Paged KV block allocator；

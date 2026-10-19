@@ -80,6 +80,27 @@ __global__ void kv_write_kernel(scalar_t* key_cache, scalar_t* value_cache, cons
         value_cache[dst + d] = value[src + d];
     }
 }
+
+template <typename scalar_t>
+__global__ void kv_write_batch_kernel(scalar_t* key_cache, scalar_t* value_cache, const int64_t* tables,
+                                      const int64_t* offsets, const scalar_t* key, const scalar_t* value,
+                                      int64_t batch, int64_t table_width, int64_t block_size,
+                                      int64_t num_blocks, int64_t kv_heads, int64_t dim) {
+    const int64_t request = blockIdx.x;
+    if (request >= batch) return;
+    const int64_t logical = offsets[request];
+    const int64_t page_index = logical / block_size;
+    const int64_t in_block = logical % block_size;
+    if (page_index < 0 || page_index >= table_width) return;
+    const int64_t physical = tables[request * table_width + page_index];
+    if (physical < 0 || physical >= num_blocks) return;
+    const int64_t dst = ((physical * block_size + in_block) * kv_heads) * dim;
+    const int64_t src = request * kv_heads * dim;
+    for (int64_t d = threadIdx.x; d < kv_heads * dim; d += THREADS) {
+        key_cache[dst + d] = key[src + d];
+        value_cache[dst + d] = value[src + d];
+    }
+}
 } // namespace
 
 template <typename scalar_t>
@@ -145,4 +166,23 @@ void write_kv_cache_cuda(const at::Tensor& kc, const at::Tensor& vc, const at::T
     auto stream = c10::cuda::getCurrentCUDAStream(kc.get_device()).stream();
     if (kc.scalar_type() == at::kHalf) launch_write<at::Half>(kc, vc, ids, offset, k, v, stream);
     else launch_write<at::BFloat16>(kc, vc, ids, offset, k, v, stream);
+}
+
+void write_kv_cache_batch_cuda(const at::Tensor& kc, const at::Tensor& vc, const at::Tensor& tables,
+                               const at::Tensor& offsets, const at::Tensor& k, const at::Tensor& v,
+                               int64_t block_size, bool validate) {
+    const c10::cuda::CUDAGuard guard(kc.device());
+    if (validate) TORCH_CHECK(!((tables < 0) | (tables >= kc.size(0))).any().item<bool>(), "KV batch physical block id out of range");
+    auto stream = c10::cuda::getCurrentCUDAStream(kc.get_device()).stream();
+    const int64_t batch = k.size(0);
+    if (kc.scalar_type() == at::kHalf) {
+        kv_write_batch_kernel<at::Half><<<static_cast<unsigned int>(batch), THREADS, 0, stream>>>(
+            kc.data_ptr<at::Half>(), vc.data_ptr<at::Half>(), tables.data_ptr<int64_t>(), offsets.data_ptr<int64_t>(),
+            k.data_ptr<at::Half>(), v.data_ptr<at::Half>(), batch, tables.size(1), block_size, kc.size(0), kc.size(2), kc.size(3));
+    } else {
+        kv_write_batch_kernel<at::BFloat16><<<static_cast<unsigned int>(batch), THREADS, 0, stream>>>(
+            kc.data_ptr<at::BFloat16>(), vc.data_ptr<at::BFloat16>(), tables.data_ptr<int64_t>(), offsets.data_ptr<int64_t>(),
+            k.data_ptr<at::BFloat16>(), v.data_ptr<at::BFloat16>(), batch, tables.size(1), block_size, kc.size(0), kc.size(2), kc.size(3));
+    }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

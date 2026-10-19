@@ -62,3 +62,20 @@ def write_kv_cache(key_cache, value_cache, block_ids, token_offset, key, value,
         return
     from .cuda_extension import load_cuda_extension
     load_cuda_extension().write_kv_cache(key_cache, value_cache, ids, token_offset, key, value, block_size, validate)
+
+
+def write_kv_cache_batch(key_cache, value_cache, block_tables, token_offsets, key, value,
+                         block_size, *, backend="torch", validate=True):
+    _backend(backend)
+    if key.shape != value.shape or key.ndim != 3:
+        raise ValueError("batch key/value must be [batch, kv_heads, head_dim]")
+    if block_tables.ndim != 2 or token_offsets.ndim != 1 or block_tables.shape[0] != key.shape[0] or token_offsets.shape[0] != key.shape[0]:
+        raise ValueError("batch block table or offset shape mismatch")
+    tables = block_tables.to(device=key_cache.device, dtype=torch.long).contiguous()
+    offsets = token_offsets.to(device=key_cache.device, dtype=torch.long).contiguous()
+    if backend == "torch":
+        for batch in range(key.shape[0]):
+            write_kv_cache(key_cache, value_cache, tables[batch], int(offsets[batch]), key[batch].unsqueeze(0), value[batch].unsqueeze(0), block_size, backend="torch", validate=validate)
+        return
+    from .cuda_extension import load_cuda_extension
+    load_cuda_extension().write_kv_cache_batch(key_cache, value_cache, tables, offsets, key, value, block_size, validate)

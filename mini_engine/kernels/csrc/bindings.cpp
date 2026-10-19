@@ -9,6 +9,9 @@ std::vector<at::Tensor> apply_rope_cuda(const at::Tensor& q, const at::Tensor& k
 void write_kv_cache_cuda(const at::Tensor& key_cache, const at::Tensor& value_cache,
     const at::Tensor& ids, int64_t offset, const at::Tensor& key, const at::Tensor& value,
     int64_t block_size, bool validate);
+void write_kv_cache_batch_cuda(const at::Tensor& key_cache, const at::Tensor& value_cache,
+    const at::Tensor& block_tables, const at::Tensor& offsets, const at::Tensor& key, const at::Tensor& value,
+    int64_t block_size, bool validate);
 
 at::Tensor paged_attention_cuda(const at::Tensor& query, const at::Tensor& key,
     const at::Tensor& value, const at::Tensor& tables, const at::Tensor& lengths,
@@ -112,6 +115,25 @@ void write_kv_cache_checked(const at::Tensor& key_cache, const at::Tensor& value
     write_kv_cache_cuda(key_cache, value_cache, ids, offset, key, value, block_size, validate);
 }
 
+void write_kv_cache_batch_checked(const at::Tensor& key_cache, const at::Tensor& value_cache,
+    const at::Tensor& tables, const at::Tensor& offsets, const at::Tensor& key, const at::Tensor& value,
+    int64_t block_size, bool validate) {
+    for (const auto& t : {key_cache, value_cache, tables, offsets, key, value}) {
+        TORCH_CHECK(t.is_cuda() && t.is_contiguous(), "batch KV write inputs must be contiguous CUDA tensors");
+        TORCH_CHECK(t.device() == key_cache.device(), "batch KV write inputs must share a device");
+    }
+    TORCH_CHECK(key_cache.dim() == 4 && value_cache.sizes() == key_cache.sizes(), "batch cache shape mismatch");
+    TORCH_CHECK(key.dim() == 3 && value.sizes() == key.sizes(), "batch K/V shape mismatch");
+    TORCH_CHECK(tables.dim() == 2 && offsets.dim() == 1 && tables.size(0) == key.size(0) && offsets.size(0) == key.size(0), "batch table shape mismatch");
+    TORCH_CHECK(tables.scalar_type() == at::kLong && offsets.scalar_type() == at::kLong, "batch metadata must be int64");
+    TORCH_CHECK(block_size > 0 && key_cache.size(1) == block_size, "batch block size mismatch");
+    TORCH_CHECK(key.size(1) == key_cache.size(2) && key.size(2) == key_cache.size(3), "batch K/V shape mismatch");
+    TORCH_CHECK(key_cache.scalar_type() == at::kHalf || key_cache.scalar_type() == at::kBFloat16, "batch KV cache requires FP16/BF16");
+    TORCH_CHECK(key.scalar_type() == key_cache.scalar_type() && value.scalar_type() == key_cache.scalar_type(), "batch KV dtype mismatch");
+    TORCH_CHECK(!((offsets < 0) | (offsets >= tables.size(1) * block_size)).any().item<bool>(), "batch KV offset out of range");
+    write_kv_cache_batch_cuda(key_cache, value_cache, tables, offsets, key, value, block_size, validate);
+}
+
 at::Tensor paged_attention(const at::Tensor& query, const at::Tensor& key,
     const at::Tensor& value, const at::Tensor& tables, const at::Tensor& lengths,
     int64_t block_size, bool validate) {
@@ -155,4 +177,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("embedding_lookup", &embedding_lookup_checked, "FP32/FP16/BF16 embedding gather");
     m.def("apply_rope", &apply_rope_checked, "FP16/BF16 rotary embedding");
     m.def("write_kv_cache", &write_kv_cache_checked, "FP16/BF16 paged KV scatter");
+    m.def("write_kv_cache_batch", &write_kv_cache_batch_checked, "FP16/BF16 batched paged KV scatter");
 }

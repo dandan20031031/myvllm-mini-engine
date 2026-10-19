@@ -50,11 +50,18 @@ class Scheduler:
                 continue
             if request.prompt_len > budget:
                 break
-            if not self.block_manager.can_allocate(request.prompt_len):
+            required = self.block_manager.blocks_required(request.prompt_len)
+            suffix_blocks = max(required - len(request.prefix_block_ids), 0)
+            if suffix_blocks > self.block_manager.free_blocks:
                 break
             self.waiting.remove(request)
             request.state = RequestState.RUNNING
-            request.block_ids = self.block_manager.allocate(request.request_id, request.prompt_len)
+            if request.prefix_block_ids:
+                request.block_ids = self.block_manager.allocate_with_prefix(
+                    request.request_id, request.prompt_len, request.prefix_block_ids
+                )
+            else:
+                request.block_ids = self.block_manager.allocate(request.request_id, request.prompt_len)
             self.running[request.request_id] = request
             prefill.append(request)
             budget -= request.prompt_len

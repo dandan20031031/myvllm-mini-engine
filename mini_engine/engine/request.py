@@ -23,6 +23,9 @@ class GenerationRequest:
     block_ids: list[int] = field(default_factory=list)
     generated_tokens: int = 0
     finished_reason: Optional[str] = None
+    prefix_len: int = 0
+    prefix_cache_key: Optional[tuple[int, ...]] = None
+    prefix_block_ids: list[int] = field(default_factory=list)
 
     @property
     def prompt_len(self) -> int:

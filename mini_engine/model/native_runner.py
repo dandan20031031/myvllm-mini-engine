@@ -123,3 +123,16 @@ class NativeQwen3Runner:
 
     def generate(self, prompt, max_new_tokens=128, **kwargs):
         return self.generate_incremental(prompt, max_new_tokens, **kwargs).text
+
+    def create_batch_runtime(self, *, max_prefix_entries=128):
+        """Create the scheduler-driven runtime over this runner's model/cache."""
+        from ..cache import PrefixCache
+        from ..engine import NativeBatchRuntime
+        from ..engine.scheduler import Scheduler
+
+        scheduler = Scheduler(self.block_manager)
+        prefix = PrefixCache(self.block_manager, max_entries=max_prefix_entries)
+        return NativeBatchRuntime(
+            self.model, scheduler, self.cache,
+            prefix_cache=prefix, eos_token_ids=self.eos_token_ids,
+        )

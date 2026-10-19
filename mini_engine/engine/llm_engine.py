@@ -102,3 +102,8 @@ class LLMEngine:
             max_new_tokens=self.config.max_new_tokens if max_new_tokens is None else max_new_tokens,
             **kwargs,
         )
+
+    def create_native_runtime(self, *, max_prefix_entries=128):
+        if self.model_runner is None or not hasattr(self.model_runner, "create_batch_runtime"):
+            raise RuntimeError("a NativeQwen3Runner is required")
+        return self.model_runner.create_batch_runtime(max_prefix_entries=max_prefix_entries)
