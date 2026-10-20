@@ -135,7 +135,8 @@ class NativeQwen3Runner:
         result = self.generate_incremental(None, max_new_tokens, messages=list(messages), **kwargs)
         return result.text
 
-    def create_batch_runtime(self, *, max_prefix_entries=128):
+    def create_batch_runtime(self, *, max_prefix_entries=128, graph_manager=None,
+                             graph_padding_block_ids=None, graph_padding_blocks=0):
         """Create the scheduler-driven runtime over this runner's model/cache."""
         from ..cache import PrefixCache
         from ..engine import NativeBatchRuntime
@@ -143,7 +144,16 @@ class NativeQwen3Runner:
 
         scheduler = Scheduler(self.block_manager)
         prefix = PrefixCache(self.block_manager, max_entries=max_prefix_entries)
-        return NativeBatchRuntime(
+        if graph_manager is not None and graph_padding_block_ids is None:
+            if graph_padding_blocks <= 0:
+                graph_padding_blocks = max(graph_manager.block_buckets)
+            graph_padding_block_ids = self.block_manager.allocate(
+                "__graph_padding__", graph_padding_blocks
+            )
+        runtime = NativeBatchRuntime(
             self.model, scheduler, self.cache,
             prefix_cache=prefix, eos_token_ids=self.eos_token_ids,
+            graph_manager=graph_manager,
         )
+        runtime.graph_padding_block_ids = graph_padding_block_ids
+        return runtime

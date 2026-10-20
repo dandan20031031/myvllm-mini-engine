@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import torch
 
 from ..cache import PrefixCache
+from .cuda_graph import DecodeGraphManager
 from ..sampling import sample_next_token
 from .request import GenerationRequest, RequestState
 
@@ -27,12 +28,15 @@ class NativeBatchRuntime:
     full prompt until cached next_logits integration is added.
     """
 
-    def __init__(self, model, scheduler, cache, *, prefix_cache=None, eos_token_ids=None):
+    def __init__(self, model, scheduler, cache, *, prefix_cache=None, eos_token_ids=None,
+                 graph_manager: DecodeGraphManager | None = None):
         self.model = model
         self.scheduler = scheduler
         self.cache = cache
         self.prefix_cache = prefix_cache or PrefixCache(scheduler.block_manager)
         self.eos_token_ids = set(eos_token_ids or [])
+        self.graph_manager = graph_manager
+        self.graph_padding_block_ids = None
 
     def prepare_waiting(self) -> None:
         for request in list(self.scheduler.waiting):
@@ -62,7 +66,23 @@ class NativeBatchRuntime:
         tables = torch.full((len(requests), width), -1, device=device, dtype=torch.long)
         for row, request in enumerate(requests):
             tables[row, : len(request.block_ids)] = torch.tensor(request.block_ids, device=device)
-        logits = self.model.forward_decode_batch(tokens, self.cache, tables, positions)
+        if self.graph_manager is None:
+            logits = self.model.forward_decode_batch(tokens, self.cache, tables, positions)
+        else:
+            padding = self.graph_padding_block_ids
+            if padding is None:
+                raise RuntimeError("graph replay requires reserved graph_padding_block_ids")
+            bucket = self.graph_manager.get(
+                len(requests), tables.shape[1], padding_block_ids=padding
+            )
+            if not bucket.captured:
+                bucket.capture()
+            padded = torch.full(
+                (len(requests), bucket.shape.max_blocks), -1,
+                device=device, dtype=torch.long,
+            )
+            padded[:, :tables.shape[1]] = tables
+            logits = bucket.replay(tokens, positions, padded, active_count=len(requests))
         chosen = sample_next_token(logits, temperature=0.0)
         result = {}
         for row, request in enumerate(requests):

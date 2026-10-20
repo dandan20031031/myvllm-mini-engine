@@ -87,7 +87,7 @@ class Attention(nn.Module):
         v = self.v_proj(x).view(length, cfg.num_key_value_heads, cfg.head_dim)
         rope_cos = cos.squeeze(1) if self.data_backend == "cuda" else cos
         rope_sin = sin.squeeze(1) if self.data_backend == "cuda" else sin
-        q, k = apply_rope_backend(q, k, rope_cos, rope_sin, backend=self.data_backend)
+        q, k = apply_rope_backend(q, k, rope_cos, rope_sin, backend=self.data_backend, validate=False)
         if self.data_backend == "cuda":
             cache.write_cuda(layer, block_ids, position, k, v, validate=False)
         else:
@@ -114,7 +114,7 @@ class Attention(nn.Module):
         v = self.v_proj(x).view(batch, cfg.num_key_value_heads, cfg.head_dim)
         rope_cos = cos if self.data_backend == "cuda" else cos.unsqueeze(1)
         rope_sin = sin if self.data_backend == "cuda" else sin.unsqueeze(1)
-        q, k = apply_rope_backend(q, k, rope_cos, rope_sin, backend=self.data_backend)
+        q, k = apply_rope_backend(q, k, rope_cos, rope_sin, backend=self.data_backend, validate=False)
         write_kv_cache_batch(
             cache.key[layer], cache.value[layer], block_tables, positions,
             k, v, cache.shape.block_size, backend=self.data_backend, validate=False,
@@ -238,7 +238,7 @@ class NativeQwen3(nn.Module):
         weight = self.model.embed_tokens.weight
         if cache.device != weight.device or cache.dtype != weight.dtype:
             raise ValueError("cache must match model device and dtype")
-        x = embedding_lookup(weight, input_ids.to(weight.device), backend=self.data_backend)
+        x = embedding_lookup(weight, input_ids.to(weight.device), backend=self.data_backend, validate=False)
         inv_freq = 1.0 / (cfg.rope_theta ** (torch.arange(0, cfg.head_dim, 2, device=x.device).float() / cfg.head_dim))
         positions = torch.arange(position, position + x.shape[0], device=x.device).float()
         angles = positions[:, None] * inv_freq[None, :]
@@ -264,7 +264,7 @@ class NativeQwen3(nn.Module):
         weight = self.model.embed_tokens.weight
         if cache.device != weight.device or cache.dtype != weight.dtype:
             raise ValueError("cache must match model device and dtype")
-        x = embedding_lookup(weight, input_ids.to(weight.device), backend=self.data_backend)
+        x = embedding_lookup(weight, input_ids.to(weight.device), backend=self.data_backend, validate=False)
         inv_freq = 1.0 / (cfg.rope_theta ** (torch.arange(0, cfg.head_dim, 2, device=x.device).float() / cfg.head_dim))
         angles = positions.to(device=x.device, dtype=torch.float32)[:, None] * inv_freq[None, :]
         cos, sin = angles.cos().to(x.dtype), angles.sin().to(x.dtype)

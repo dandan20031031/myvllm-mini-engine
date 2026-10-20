@@ -59,11 +59,13 @@ class DecodeGraphBucket:
             return
         if warmup < 0:
             raise ValueError("warmup cannot be negative")
-        if self.padding_block_ids is None and self.shape.batch_size > 1:
-            # Capture is safe with full buckets. Padded slots need explicit
-            # scratch pages; silently aliasing live pages would corrupt KV.
-            raise ValueError("provide padding_block_ids before capturing a padded bucket")
-        self.block_tables.zero_()
+        if self.padding_block_ids is None:
+            # Capture itself performs model writes. Without scratch pages it
+            # could overwrite a live request's KV page before the first replay.
+            raise ValueError("provide reserved padding_block_ids before capture")
+        self.block_tables.copy_(self.padding_block_ids.view(1, -1).expand(self.shape.batch_size, -1))
+        self.input_ids.zero_()
+        self.positions.zero_()
         for _ in range(warmup):
             self.logits = self.model.forward_decode_batch(
                 self.input_ids, self.cache, self.block_tables, self.positions
