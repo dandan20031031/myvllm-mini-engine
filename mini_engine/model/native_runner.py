@@ -22,7 +22,7 @@ class NativeQwen3Runner:
         self.last_backend = model.decode_backend
 
     @classmethod
-    def from_pretrained(cls, path, *, device="cuda", dtype=torch.bfloat16, prefill_backend="auto", decode_backend="torch", elementwise_backend="torch", data_backend="torch",
+    def from_pretrained(cls, path, *, device="cuda", dtype=torch.bfloat16, prefill_backend="auto", decode_backend="torch", elementwise_backend="torch", data_backend="torch", linear_backend="torch",
                         num_blocks=256, block_size=16, enable_thinking=False, local_files_only=False,
                         quantization=None):
         from ..runtime import configure_local_cache
@@ -45,13 +45,15 @@ class NativeQwen3Runner:
                 raise ValueError("CUDA data kernels require CUDA device and FP16/BF16 weights")
             from ..kernels.cuda_extension import load_cuda_extension
             load_cuda_extension()
+        if linear_backend == "cuda" and not str(device).startswith("cuda"):
+            raise ValueError("CUDA linear backend requires a CUDA device")
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=local_files_only)
         reference = AutoModelForCausalLM.from_pretrained(
             path, torch_dtype=dtype, local_files_only=local_files_only,
         ).to(device).eval()
-        native = NativeQwen3.from_hf_model(reference, prefill_backend, decode_backend, elementwise_backend, data_backend)
+        native = NativeQwen3.from_hf_model(reference, prefill_backend, decode_backend, elementwise_backend, data_backend, linear_backend)
         stop_ids = reference.generation_config.eos_token_id
         del reference
         if quantization is not None:
@@ -64,14 +66,18 @@ class NativeQwen3Runner:
             torch.cuda.synchronize(self.cache.device)
 
     @torch.inference_mode()
-    def generate_incremental(self, prompt, max_new_tokens=128, *, temperature=0.0, top_k=0, top_p=1.0):
+    def generate_incremental(self, prompt=None, max_new_tokens=128, *, temperature=0.0, top_k=0, top_p=1.0, messages=None):
         if max_new_tokens <= 0:
             raise ValueError("max_new_tokens must be positive")
         if self._busy:
             raise RuntimeError("native runner currently supports one active request")
+        if messages is None:
+            if prompt is None:
+                raise ValueError("prompt or messages is required")
+            messages = [{"role": "user", "content": prompt}]
         ids = self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt}], tokenize=True,
-            add_generation_prompt=True, enable_thinking=self.enable_thinking, return_tensors="pt",
+            messages, tokenize=True, add_generation_prompt=True,
+            enable_thinking=self.enable_thinking, return_tensors="pt",
         )[0].to(self.cache.device)
         required = ids.numel() + max_new_tokens - 1
         if required > self.model.config.max_position_embeddings:
@@ -123,6 +129,11 @@ class NativeQwen3Runner:
 
     def generate(self, prompt, max_new_tokens=128, **kwargs):
         return self.generate_incremental(prompt, max_new_tokens, **kwargs).text
+
+    def chat(self, messages, max_new_tokens=128, **kwargs):
+        """Generate one assistant turn from a Qwen chat-template message list."""
+        result = self.generate_incremental(None, max_new_tokens, messages=list(messages), **kwargs)
+        return result.text
 
     def create_batch_runtime(self, *, max_prefix_entries=128):
         """Create the scheduler-driven runtime over this runner's model/cache."""

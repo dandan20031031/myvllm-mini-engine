@@ -12,6 +12,7 @@ from torch import nn
 from ..cache import KVCachePool
 from ..kernels.data import apply_rope as apply_rope_backend, embedding_lookup, write_kv_cache_batch
 from ..kernels.elementwise import residual_add, residual_rms_norm, rms_norm, silu_and_mul
+from ..kernels.linear import make_linear
 from ..kernels.paged import paged_attention
 from ..kernels.prefill import prefill_attention
 
@@ -66,14 +67,15 @@ class RMSNorm(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, config, elementwise_backend="torch", data_backend="torch"):
+    def __init__(self, config, elementwise_backend="torch", data_backend="torch", linear_backend="torch"):
         super().__init__()
         self.config = config
         self.data_backend = data_backend
-        self.q_proj = nn.Linear(config.hidden_size, config.num_attention_heads * config.head_dim, bias=config.attention_bias)
-        self.k_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * config.head_dim, bias=config.attention_bias)
-        self.v_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * config.head_dim, bias=config.attention_bias)
-        self.o_proj = nn.Linear(config.num_attention_heads * config.head_dim, config.hidden_size, bias=config.attention_bias)
+        self.linear_backend = linear_backend
+        self.q_proj = make_linear(config.hidden_size, config.num_attention_heads * config.head_dim, bias=config.attention_bias, backend=linear_backend)
+        self.k_proj = make_linear(config.hidden_size, config.num_key_value_heads * config.head_dim, bias=config.attention_bias, backend=linear_backend)
+        self.v_proj = make_linear(config.hidden_size, config.num_key_value_heads * config.head_dim, bias=config.attention_bias, backend=linear_backend)
+        self.o_proj = make_linear(config.num_attention_heads * config.head_dim, config.hidden_size, bias=config.attention_bias, backend=linear_backend)
         self.q_norm = RMSNorm(config.head_dim, config.rms_norm_eps, elementwise_backend)
         self.k_norm = RMSNorm(config.head_dim, config.rms_norm_eps, elementwise_backend)
 
@@ -126,11 +128,11 @@ class Attention(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, config, elementwise_backend="torch"):
+    def __init__(self, config, elementwise_backend="torch", linear_backend="torch"):
         super().__init__()
-        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
+        self.gate_proj = make_linear(config.hidden_size, config.intermediate_size, bias=False, backend=linear_backend)
+        self.up_proj = make_linear(config.hidden_size, config.intermediate_size, bias=False, backend=linear_backend)
+        self.down_proj = make_linear(config.intermediate_size, config.hidden_size, bias=False, backend=linear_backend)
         self.elementwise_backend = elementwise_backend
 
     def forward(self, x):
@@ -138,11 +140,11 @@ class MLP(nn.Module):
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, config, elementwise_backend="torch", data_backend="torch"):
+    def __init__(self, config, elementwise_backend="torch", data_backend="torch", linear_backend="torch"):
         super().__init__()
         self.elementwise_backend = elementwise_backend
-        self.self_attn = Attention(config, elementwise_backend, data_backend)
-        self.mlp = MLP(config, elementwise_backend)
+        self.self_attn = Attention(config, elementwise_backend, data_backend, linear_backend)
+        self.mlp = MLP(config, elementwise_backend, linear_backend)
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps, elementwise_backend)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps, elementwise_backend)
 
@@ -166,18 +168,18 @@ class DecoderLayer(nn.Module):
 
 
 class Qwen3Backbone(nn.Module):
-    def __init__(self, config, elementwise_backend="torch", data_backend="torch"):
+    def __init__(self, config, elementwise_backend="torch", data_backend="torch", linear_backend="torch"):
         super().__init__()
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList([DecoderLayer(config, elementwise_backend, data_backend) for _ in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([DecoderLayer(config, elementwise_backend, data_backend, linear_backend) for _ in range(config.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps, elementwise_backend)
 
 
 class NativeQwen3(nn.Module):
-    def __init__(self, config: Qwen3Config, prefill_backend="auto", decode_backend="torch", elementwise_backend="torch", data_backend="torch"):
+    def __init__(self, config: Qwen3Config, prefill_backend="auto", decode_backend="torch", elementwise_backend="torch", data_backend="torch", linear_backend="torch"):
         super().__init__()
         self.config = config
-        if prefill_backend not in {"auto", "flash", "math"}:
+        if prefill_backend not in {"auto", "flash", "math", "cuda"}:
             raise ValueError("unknown prefill backend")
         self.prefill_backend = prefill_backend
         if decode_backend not in {"torch", "cuda"}:
@@ -189,18 +191,21 @@ class NativeQwen3(nn.Module):
         if data_backend not in {"torch", "cuda"}:
             raise ValueError("data backend must be torch or cuda")
         self.data_backend = data_backend
+        if linear_backend not in {"torch", "cuda"}:
+            raise ValueError("linear backend must be torch or cuda")
+        self.linear_backend = linear_backend
         self.quantization_report = None
-        self.model = Qwen3Backbone(config, elementwise_backend, data_backend)
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.model = Qwen3Backbone(config, elementwise_backend, data_backend, linear_backend)
+        self.lm_head = make_linear(config.hidden_size, config.vocab_size, bias=False, backend=linear_backend)
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
     @classmethod
-    def from_hf_model(cls, reference, prefill_backend="auto", decode_backend="torch", elementwise_backend="torch", data_backend="torch"):
+    def from_hf_model(cls, reference, prefill_backend="auto", decode_backend="torch", elementwise_backend="torch", data_backend="torch", linear_backend="torch"):
         config = Qwen3Config.from_hf(reference.config)
         # Reuse loaded storage instead of allocating a second 0.6B weight copy.
         with torch.device("meta"):
-            model = cls(config, prefill_backend, decode_backend, elementwise_backend, data_backend)
+            model = cls(config, prefill_backend, decode_backend, elementwise_backend, data_backend, linear_backend)
         model.load_state_dict(reference.state_dict(), strict=True, assign=True)
         return model.eval()
 

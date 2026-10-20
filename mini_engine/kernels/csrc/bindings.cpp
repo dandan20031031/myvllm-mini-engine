@@ -3,6 +3,8 @@
 #include <limits>
 #include <vector>
 
+at::Tensor causal_prefill_cuda(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v);
+
 at::Tensor embedding_lookup_cuda(const at::Tensor& weight, const at::Tensor& ids, bool validate);
 std::vector<at::Tensor> apply_rope_cuda(const at::Tensor& q, const at::Tensor& k,
     const at::Tensor& cos, const at::Tensor& sin, bool validate);
@@ -178,4 +180,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("apply_rope", &apply_rope_checked, "FP16/BF16 rotary embedding");
     m.def("write_kv_cache", &write_kv_cache_checked, "FP16/BF16 paged KV scatter");
     m.def("write_kv_cache_batch", &write_kv_cache_batch_checked, "FP16/BF16 batched paged KV scatter");
+    m.def("causal_prefill", &causal_prefill_cuda, "FP16/BF16 causal prefill attention");
 }

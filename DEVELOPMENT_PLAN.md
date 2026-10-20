@@ -132,9 +132,9 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 | 09 | Scheduler 接通 native model execution，真实 continuous batching、取消和回收 |
 | 10 | Prefix/Block Cache，prefix hash、引用计数和共享 block |
 | 11 | CUDA Graph decode，shape bucket 和固定 metadata |
-| 12 | Windows Prefill CUDA，在线 softmax/causal/GQA |
-| 13 | Linear/LM head 与 INT8/INT4/FP8 GEMM |
-| 14 | Windows API、SSE、本地 RAG/代码助手（后置可选） |
+| 12 | Windows Prefill CUDA，在线 softmax/causal/GQA | 完成 correctness-first backend |
+| 13 | Linear/LM head 与 INT8/INT4/FP8 GEMM | 完成显式 CUDA Linear/cuBLAS 边界；量化 GEMM 待做 |
+| 14 | Windows API、SSE、本地 RAG/代码助手（后置可选） | 待实现 |
 | 15 | 完整 Qwen3 benchmark，与 Transformers、具体 MiniVLLM、vLLM/SGLang/TensorRT-LLM 对比 |
 | 16 | 精度感知 KV、FP8/INT8 KV、NVFP4/MXFP8 能力 |
 | 17 | 投机解码：greedy 多 token 验证、KV 回退、confidence-scheduled draft length、随机采样校正 |
