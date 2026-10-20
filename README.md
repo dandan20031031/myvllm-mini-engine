@@ -128,6 +128,14 @@ python -m mini_engine `
 
 当前已通过小型随机 Qwen3 的 CPU FP32 / GPU BF16 / GPU FP16 对齐；尚未在完整 Qwen3-0.6B 权重上验收生成。上面的模型路径是示例，请替换成实际权重目录。
 
+当前已下载并验收完整 Qwen3-0.6B：
+
+```text
+D:\dandan123\dandan\myvllm\models\Qwen3-0.6B
+```
+
+CUDA 全后端真实 benchmark 结果保存在 `benchmarks/results/native_qwen3_cuda.json`。RTX 5080 BF16 下，短样本 median TPOT 约 20–21 ms/token；这是 native 单请求结果，不是 vLLM 对比结果。
+
 项目独立环境中的验证命令（不激活环境也可运行）：
 
 ```powershell

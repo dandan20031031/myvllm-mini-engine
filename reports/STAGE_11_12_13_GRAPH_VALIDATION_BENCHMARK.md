@@ -89,6 +89,39 @@ Graph bucket 不负责 CPU 请求调度、Prefix Cache 或 block 所有权。它
 
 当前脚本是 native 单请求基线，不是 vLLM 对比；完整权重缺失时不会运行。
 
+## 4.1 RTX 5080 真实 Qwen3-0.6B 结果
+
+已从 Hugging Face 下载 `Qwen/Qwen3-0.6B` 到：
+
+```text
+D:\dandan123\dandan\myvllm\models\Qwen3-0.6B
+```
+
+使用完整 CUDA backend 完成真实生成验收：
+
+```text
+GPU         NVIDIA GeForce RTX 5080
+dtype       BF16
+prefill     CUDA correctness-first
+decode      CUDA Paged Attention
+elementwise CUDA
+data        CUDA
+linear      CUDA matmul/cuBLAS dispatch
+```
+
+验收 prompts 均生成了非空中文输出，native runner 正常返回 EOS/length 状态和 token ids。torch backend 与 CUDA backend 都通过了验收脚本。
+
+端到端 benchmark 使用 warmup=1、repetitions=3、max_new_tokens=32：
+
+| prompt | median TTFT | median TPOT | median total |
+|---|---:|---:|---:|
+| KV Cache 解释 | 24.16 ms | 20.42 ms/token | 662.53 ms |
+| continuous batching 解释 | 22.47 ms | 21.11 ms/token | 680.22 ms |
+
+完整结果：[native_qwen3_cuda.json](../benchmarks/results/native_qwen3_cuda.json)。
+
+这些数字是本项目 native 单请求结果，不是 vLLM 对比；重复次数较少，也未包含 HTTP 服务开销。
+
 ## 5. 测试结果和真实状态
 
 全量测试：
