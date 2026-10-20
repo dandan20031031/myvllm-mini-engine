@@ -136,6 +136,20 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 | 13 | Linear/LM head 与 INT8/INT4/FP8 GEMM |
 | 14 | Windows API、SSE、本地 RAG/代码助手（后置可选） |
 | 15 | 完整 Qwen3 benchmark，与 Transformers、具体 MiniVLLM、vLLM/SGLang/TensorRT-LLM 对比 |
-| 16 | 精度感知 KV、FP8/INT8 KV、NVFP4/MXFP8 能力和 prompt lookup/speculative decoding |
+| 16 | 精度感知 KV、FP8/INT8 KV、NVFP4/MXFP8 能力 |
+| 17 | 投机解码：greedy 多 token 验证、KV 回退、confidence-scheduled draft length、随机采样校正 |
 
 系统创新主线为：CUDA kernels + Paged KV Cache + Continuous Batching + Prefix Cache + CUDA Graph + Precision-aware KV + Windows local application。
+
+### 投机解码子路线
+
+投机解码正式列为阶段 17，按以下顺序实现：
+
+1. draft token 接口和目标模型多 token causal 验证；
+2. greedy 接受连续前缀，拒绝位置回退 KV Cache；
+3. prompt lookup / 小 draft model 两种候选来源；
+4. confidence-scheduled draft length（动态 1～N）；
+5. 随机采样接受概率和校正采样；
+6. 记录 acceptance rate、每轮提交 token 数、额外显存和真实 TPOT。
+
+投机解码必须先证明 greedy 输出与普通 decode 一致，再测加速；不能只比较草稿和目标模型是否采出相同 token 来实现随机采样版本。
