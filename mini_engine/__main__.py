@@ -20,7 +20,7 @@ def main():
     parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--num-blocks", type=int, default=256)
     parser.add_argument("--block-size", type=int, default=16)
-    parser.add_argument("--prefill-backend", choices=["auto", "flash", "math"], default="auto")
+    parser.add_argument("--prefill-backend", choices=["auto", "flash", "math", "cuda"], default="auto")
     parser.add_argument("--decode-backend", choices=["torch", "cuda"], default="torch")
     parser.add_argument("--elementwise-backend", choices=["torch", "cuda"], default="torch")
     parser.add_argument("--data-backend", choices=["torch", "cuda"], default="torch")
