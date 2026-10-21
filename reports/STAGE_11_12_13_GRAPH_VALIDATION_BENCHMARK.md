@@ -96,7 +96,7 @@ Graph manager 现在可以通过 `NativeQwen3Runner.create_batch_runtime(use_cud
 已从 Hugging Face 下载 `Qwen/Qwen3-0.6B` 到：
 
 ```text
-D:\dandan123\dandan\myvllm\models\Qwen3-0.6B
+`<MODEL_DIR>/Qwen3-0.6B`
 ```
 
 使用完整 CUDA backend 完成真实生成验收：

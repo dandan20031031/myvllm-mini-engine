@@ -1,6 +1,8 @@
 # MiniQwenEngine
 
-一个面向 Qwen3-0.6B 的小型单 GPU 推理引擎实验项目。开发路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)。当前版本先完成可测试的引擎骨架，包含：
+一个面向 Qwen3-0.6B 的小型单 GPU 推理引擎实验项目，优先支持 Windows 11、PyTorch CUDA 和原生 CUDA 扩展。开发路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)。
+
+当前版本包含可测试的引擎骨架、native Qwen3 forward、Paged KV Cache、可选 CUDA 算子和本地 CLI 对话路径。项目仍处于研究和性能优化阶段，不能把单算子 benchmark 直接当成与 vLLM 的端到端结论。
 
 阶段报告索引：
 
@@ -32,6 +34,12 @@
 - 参考版 prefill + `past_key_values` 单 token 增量生成，以及 TTFT/TPOT 统计。
 - backend-agnostic benchmark 工具，可统一记录延迟、吞吐和 CUDA 峰值显存。
 
+## 开源与模型说明
+
+项目代码使用 Apache-2.0 许可证，详见 [LICENSE](LICENSE)。仓库不包含模型权重、tokenizer 缓存、编译产物或运行缓存。
+
+Qwen3 模型权重和 tokenizer 由 Qwen 项目单独授权。使用本项目加载模型前，请阅读 [Qwen3 模型卡](https://huggingface.co/Qwen/Qwen3-0.6B)及其许可证，并从可信来源下载权重。
+
 ## 安装与测试
 
 ```powershell
@@ -43,6 +51,12 @@ python -m pytest -q
 
 ```powershell
 pip install -e ".[model]"
+```
+
+将模型下载到本机目录后，把该目录传给 `--model`。例如 Windows PowerShell：
+
+```powershell
+$modelPath = "D:\models\Qwen3-0.6B"
 ```
 
 ## 使用调度器和分页缓存
@@ -75,7 +89,7 @@ metrics = engine.generate_incremental("介绍一下 KV Cache", max_new_tokens=64
 print(metrics.text, metrics.ttft_ms, metrics.tpot_ms)
 ```
 
-参考生成使用 Transformers，仅用于建立正确性基线。现已另外提供 NativeQwen3Runner，使用自有 forward 和 KV Cache；native runner 尚未接通调度器的多请求执行。
+参考生成使用 Transformers，仅用于建立正确性基线。`NativeQwen3Runner` 使用自有 forward 和 KV Cache，并提供 scheduler 驱动的 batch decode 实验接口；完整服务化接口仍在开发中。
 
 ## KV Cache tensor pool
 
@@ -126,13 +140,7 @@ python -m mini_engine `
 
 `auto` 会使用当前 Windows PyTorch wheel 可用的 SDPA backend；`flash` 只有在 `torch.backends.cuda.is_flash_attention_available()` 为 true 时才可用。当前环境的 Windows wheel 未编译 Flash backend，因此请使用 `auto`，不要把 math fallback 当作 Flash 性能结果。
 
-当前已通过小型随机 Qwen3 的 CPU FP32 / GPU BF16 / GPU FP16 对齐；尚未在完整 Qwen3-0.6B 权重上验收生成。上面的模型路径是示例，请替换成实际权重目录。
-
-当前已下载并验收完整 Qwen3-0.6B：
-
-```text
-D:\dandan123\dandan\myvllm\models\Qwen3-0.6B
-```
+当前已通过小型随机 Qwen3 的 CPU FP32 / GPU BF16 / GPU FP16 对齐，并在 RTX 5080 上完成完整 Qwen3-0.6B 的本地生成验收。公开仓库不包含模型权重；上面的模型路径只是示例，请替换成你自己的目录。
 
 CUDA 全后端真实 benchmark 结果保存在 `benchmarks/results/native_qwen3_cuda.json`。RTX 5080 BF16 下，短样本 median TPOT 约 20–21 ms/token；这是 native 单请求结果，不是 vLLM 对比结果。
 

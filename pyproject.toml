@@ -6,6 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "miniqwen-engine"
 version = "0.1.0"
 description = "A small Qwen3-0.6B inference engine with paged KV cache foundations"
+license = {file = "LICENSE"}
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["torch>=2.5"]
 

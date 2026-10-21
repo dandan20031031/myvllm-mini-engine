@@ -75,7 +75,7 @@ build/torch_extensions
 
 它设置当前 shell 的缓存路径，不会修改系统全局环境变量。
 
-本阶段通过 `scripts/migrate_project_cache.ps1` 把本项目安装的 Transformers、HuggingFace Hub、Tokenizers、Ninja pip 下载缓存迁到 D 盘 `.cache/pip`，每个文件迁移后进行 SHA256 校验，审计记录在 `reports/cache_migration.json`。C 盘共享 NVIDIA ComputeCache 无法可靠归属本项目，且本项目运行期间没有发现近期文件，因此保留原位。
+本阶段通过 `scripts/migrate_project_cache.ps1` 把本项目安装的 Transformers、HuggingFace Hub、Tokenizers、Ninja pip 下载缓存迁到项目目录 `.cache/pip`，每个文件迁移后进行 SHA256 校验。原始迁移记录包含本机路径，仅保留在开发环境，不纳入公开仓库。C 盘共享 NVIDIA ComputeCache 无法可靠归属本项目，且本项目运行期间没有发现近期文件，因此保留原位。
 
 ## 4. CUDA Python 接口
 

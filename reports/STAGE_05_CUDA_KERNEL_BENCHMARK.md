@@ -69,13 +69,13 @@ torch.testing.assert_close(cuda, reference, atol=tolerance, rtol=0.03)
 脚本调用 `configure_local_cache()`，默认结果为：
 
 ```text
-D:\dandan123\dandan\myvllm\benchmarks\results\paged_attention.json
+`benchmarks/results/paged_attention.json`
 ```
 
 CUDA extension 编译文件为：
 
 ```text
-D:\dandan123\dandan\myvllm\build\torch_extensions\paged_attention
+`build/torch_extensions/paged_attention`
 ```
 
 不需要 Linux shell、WSL 或 `/tmp`。
