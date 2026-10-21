@@ -60,10 +60,10 @@ Graph 外的 CPU scheduler 仍负责请求进入/退出、BlockManager、Prefix 
 ## 5. 当前边界
 
 - 本阶段完成 bucket、固定 buffer、padding slot 和 replay 基础；
-- 尚未将真实 `NativeBatchRuntime.decode_step` 切换到 Graph manager；
-- 尚未处理完整模型中所有动态分配/metadata 的 graph-capture 约束；
-- inactive slot 的 scratch KV page 需要由上层显式提供；
-- 尚未报告端到端 TPOT 收益。
+- `NativeBatchRuntime.decode_step` 已支持选择 Graph manager、首次 capture 和后续 replay；
+- 完整 Qwen3 模型的 Graph batch capture/replay 仍需在真实请求生命周期下验收，尤其要确认所有动态分配、metadata 和 KV 写入都满足 graph-capture 约束；
+- inactive slot 的 scratch KV page 需要由上层显式提供，runner 会预留这组 page；
+- 端到端 Graph TPOT、tokens/s 和 eager 对照尚未写入正式 benchmark 结果。
 
 ## 6. 投机解码计划
 
@@ -77,4 +77,4 @@ Graph 外的 CPU scheduler 仍负责请求进入/退出、BlockManager、Prefix 
 
 ## 7. 测试
 
-CPU 测试覆盖 bucket 选择和非法配置；CUDA 测试覆盖固定 buffer replay 与 active_count padding。完整模型 graph 接入和 TPOT benchmark 留在下一步。
+CPU 测试覆盖 bucket 选择和非法配置；CUDA 测试覆盖固定 buffer replay 与 active_count padding。当前全量回归为 148 passed、2 warnings；完整模型 Graph TPOT benchmark 留在下一步。

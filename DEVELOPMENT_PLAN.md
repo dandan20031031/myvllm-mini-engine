@@ -87,13 +87,15 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 | 05 | 单算子 benchmark 与 smoke 实测 | 完成 |
 | 06 | INT4/FP8 reference、native Linear、能力矩阵 | 完成 |
 | 07 | 所有 RMSNorm、Residual、SwiGLU CUDA，边界/模型/Graph 测试及单算子实测 | 完成 |
-| 08 | Embedding/RoPE/KV 写入 CUDA，复用 block table、减少每层同步 | 下一阶段 |
-| 09 | Windows Prefill Flash 风格 CUDA、在线 softmax/causal/GQA | 待实现 |
-| 10 | Linear/LM head CUDA 库后端、greedy 再 top-k/top-p；量化 GEMM 分项验收 | 待实现 |
-| 11 | 完整 Qwen3-0.6B 权重、profiling、质量和 TTFT/TPOT | 待验收；性能检查贯穿各阶段 |
-| 12 | scheduler 接通 model execution、continuous batching、HTTP/SSE、取消与异常回收 | 待实现 |
-| 13 | NVIDIA 低精度深化、可用的 NVFP4/MXFP8、低精度 KV | 待实现 |
-| 14 | Transformers、具体 MiniVLLM、vLLM 正式对比 | 待实现 |
+| 08 | Embedding/RoPE/KV 写入 CUDA，复用 block table、减少每层同步 | 完成；正确性已验收 |
+| 09+10 | Scheduler 接通 native model execution、batch decode、Prefix/Block Cache 生命周期 | 完成；prefill 跳过仍待做 |
+| 11 | CUDA Graph decode shape bucket、固定 metadata、runtime replay | 部分完成；完整模型端到端 Graph benchmark 待做 |
+| 12 | Windows CUDA prefill correctness-first backend | 完成；尚不等同 FlashAttention 性能 |
+| 13 | 显式 CUDA Linear/cuBLAS 边界、完整 Qwen3 验收和本地 Chat | 部分完成；INT4/FP8/NVFP4/MXFP8 高性能 GEMM 待做 |
+| 14 | Windows HTTP/OpenAI/SSE 服务 | 后置；尚未实现 |
+| 15 | Transformers、具体 MiniVLLM、vLLM/SGLang/TensorRT-LLM 正式对比 | 待实现 |
+| 16 | 精度感知 KV、FP8/INT8 KV、NVFP4/MXFP8 | 待实现 |
+| 17 | 投机解码 | 已列入计划；尚未实现 |
 
 后续可按实测瓶颈调整算子顺序，并更新本文件。vLLM 不作为 Windows 引擎运行依赖；若比较环境使用不同 OS，必须披露差异，不能宣称严格同环境。
 
@@ -107,11 +109,11 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 - 单算子记录 device timeline 和 eager wall time，端到端包含调度与同步；不混用口径。
 - 所有阶段生成 reports/STAGE_XX_*.md，解释每个模块、数据布局、调用链、测试结果、限制和下一阶段接口。
 
-阶段 07 全量测试为 126 passed。新增 CUDA elementwise 50 项、fallback 2 项，另有前序 74 项回归。当前仅以随机张量、小型随机 Qwen3 验证，未完成完整 0.6B 模型质量和性能验收。
+当前全量回归为 148 passed、2 warnings；CUDA 测试在 RTX 5080 上实际执行通过。完整 Qwen3-0.6B 已完成文本生成验收和单请求 TTFT/TPOT 基线，但完整模型 CUDA Graph batch 性能仍未验收。
 
-阶段 05 Event 测量可能包括 Python 调度空隙，reference 包含 gather/同步/循环，历史加速比不能视为纯 kernel 或相对 vLLM 的结论。阶段 07 同时报告 Graph 重放和 eager wall；Graph 时间也包含节点调度，不称作纯指令时间。
+阶段 05 Event 测量可能包括 Python 调度空隙，reference 包含 gather/同步/循环，历史加速比不能视为纯 kernel 或相对 vLLM 的结论。阶段 07 同时报告 Graph 重放和 eager wall；Graph 时间也包含节点调度，不称作纯指令时间。Paged Attention 和 elementwise 的加速数字是单算子或 reference 对比，不能直接外推为端到端 tokens/s。
 
-算子 CUDA Graph 测试通过，不等于整个推理循环已支持 CUDA Graph。独立 residual add 在实测 shape 下略慢于 PyTorch，保留可选后端，后续以融合降低开销。
+算子 CUDA Graph 测试通过，不等于整个推理循环已完成 CUDA Graph 性能验收。当前 decode graph 已通过 `NativeBatchRuntime.decode_step` 的代码路径和固定 buffer replay 测试，但 benchmark 脚本的 `--cuda-graph` 仍需改为真正执行 batch runtime graph replay。独立 residual add 在实测 shape 下略慢于 PyTorch，保留可选后端，后续以融合降低开销。
 
 ## 7. Git 工作流和存储
 
