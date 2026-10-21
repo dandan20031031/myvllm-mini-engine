@@ -89,6 +89,8 @@ Graph bucket 不负责 CPU 请求调度、Prefix Cache 或 block 所有权。它
 
 当前脚本是 native 单请求基线，不是 vLLM 对比；完整权重缺失时不会运行。
 
+Graph manager 现在可以通过 `NativeQwen3Runner.create_batch_runtime(use_cuda_graph=True)` 创建，runtime decode 会选择 bucket、填充固定 buffer 并 replay。使用前必须提供或由 runner 预留 `graph_padding_block_ids`；没有安全 scratch pages 时会明确拒绝 replay。
+
 ## 4.1 RTX 5080 真实 Qwen3-0.6B 结果
 
 已从 Hugging Face 下载 `Qwen/Qwen3-0.6B` 到：

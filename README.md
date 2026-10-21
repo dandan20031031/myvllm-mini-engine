@@ -136,6 +136,14 @@ D:\dandan123\dandan\myvllm\models\Qwen3-0.6B
 
 CUDA 全后端真实 benchmark 结果保存在 `benchmarks/results/native_qwen3_cuda.json`。RTX 5080 BF16 下，短样本 median TPOT 约 20–21 ms/token；这是 native 单请求结果，不是 vLLM 对比结果。
 
+运行完整回归：
+
+```powershell
+. .\scripts\enter_project.ps1
+$env:MINI_ENGINE_TEST_CUDA = "1"
+.\.venv\Scripts\python -m pytest -q -o cache_dir=build/pytest_cache
+```
+
 项目独立环境中的验证命令（不激活环境也可运行）：
 
 ```powershell

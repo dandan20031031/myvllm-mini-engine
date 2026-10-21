@@ -136,7 +136,9 @@ class NativeQwen3Runner:
         return result.text
 
     def create_batch_runtime(self, *, max_prefix_entries=128, graph_manager=None,
-                             graph_padding_block_ids=None, graph_padding_blocks=0):
+                             graph_padding_block_ids=None, graph_padding_blocks=0,
+                             use_cuda_graph=False, graph_batch_sizes=(1, 2, 4, 8),
+                             graph_block_buckets=(16, 32, 64)):
         """Create the scheduler-driven runtime over this runner's model/cache."""
         from ..cache import PrefixCache
         from ..engine import NativeBatchRuntime
@@ -144,6 +146,13 @@ class NativeQwen3Runner:
 
         scheduler = Scheduler(self.block_manager)
         prefix = PrefixCache(self.block_manager, max_entries=max_prefix_entries)
+        if use_cuda_graph and graph_manager is None:
+            from ..engine import DecodeGraphManager
+            graph_manager = DecodeGraphManager(
+                self.model, self.cache,
+                batch_sizes=graph_batch_sizes,
+                block_buckets=graph_block_buckets,
+            )
         if graph_manager is not None and graph_padding_block_ids is None:
             if graph_padding_blocks <= 0:
                 graph_padding_blocks = max(graph_manager.block_buckets)
