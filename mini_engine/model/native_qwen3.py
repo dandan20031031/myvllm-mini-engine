@@ -268,6 +268,8 @@ class NativeQwen3(nn.Module):
         return model.eval()
 
     def quantize(self, config):
+        if self.projection_fusion_enabled:
+            raise ValueError("quantization and projection fusion cannot be combined yet")
         from ..quantization.linear import quantize_model_linears
         return quantize_model_linears(self, config)
 

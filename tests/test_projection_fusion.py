@@ -58,3 +58,13 @@ def test_projection_fusion_rejects_quantized_model():
     model.quantize(QuantConfig("int8", activation_dtype="fp32", group_size=8))
     with pytest.raises(ValueError, match="before quantization"):
         model.enable_projection_fusion()
+
+
+def test_quantization_rejects_fused_model():
+    config = Qwen3Config(17, 16, 32, 1, 2, 1, 8, max_position_embeddings=32)
+    model = NativeQwen3(config, prefill_backend="math")
+    model.enable_projection_fusion()
+    from mini_engine.config import QuantConfig
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        model.quantize(QuantConfig("int8", activation_dtype="fp32", group_size=8))
