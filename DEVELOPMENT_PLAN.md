@@ -113,11 +113,11 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 - 单算子记录 device timeline 和 eager wall time，端到端包含调度与同步；不混用口径。
 - 所有阶段生成 reports/STAGE_XX_*.md，解释每个模块、数据布局、调用链、测试结果、限制和下一阶段接口。
 
-当前全量回归基线为 148 passed、2 warnings；CUDA 测试在 RTX 5080 上实际执行通过。完整 Qwen3-0.6B 已完成文本生成、单请求 TTFT/TPOT 和真实 batch CUDA Graph benchmark 验收；Graph capture-safe 修改后的回归结果会随阶段 19 提交更新。
+当前全量回归为 156 passed、2 warnings；CUDA 测试在 RTX 5080 上实际执行通过。完整 Qwen3-0.6B 已完成文本生成、单请求 TTFT/TPOT 和真实 batch CUDA Graph benchmark 验收。
 
 阶段 05 Event 测量可能包括 Python 调度空隙，reference 包含 gather/同步/循环，历史加速比不能视为纯 kernel 或相对 vLLM 的结论。阶段 07 同时报告 Graph 重放和 eager wall；Graph 时间也包含节点调度，不称作纯指令时间。Paged Attention 和 elementwise 的加速数字是单算子或 reference 对比，不能直接外推为端到端 tokens/s。
 
-算子 CUDA Graph 测试通过，不等于整个推理循环已完成 CUDA Graph 性能验收。当前 decode graph 已通过 `NativeBatchRuntime.decode_step` 的代码路径和固定 buffer replay 测试，但 benchmark 脚本的 `--cuda-graph` 仍需改为真正执行 batch runtime graph replay。独立 residual add 在实测 shape 下略慢于 PyTorch，保留可选后端，后续以融合降低开销。
+算子 CUDA Graph 测试通过，不等于所有服务路径都已完成 CUDA Graph 性能验收。当前真实 batch benchmark 已通过 `NativeBatchRuntime.decode_step` 的 Graph replay 路径；旧的单请求 benchmark 脚本中的 `--cuda-graph` 仍只记录配置，正式 Graph 对照请使用 `benchmark_native_batch.py`。独立 residual add 在实测 shape 下略慢于 PyTorch，保留可选后端，后续以融合降低开销。
 
 ## 7. Git 工作流和存储
 
