@@ -25,6 +25,8 @@ def main():
     parser.add_argument("--elementwise-backend", choices=["torch", "cuda"], default="torch")
     parser.add_argument("--data-backend", choices=["torch", "cuda"], default="torch")
     parser.add_argument("--linear-backend", choices=["torch", "cuda"], default="torch")
+    parser.add_argument("--fuse-projections", action="store_true",
+                        help="fuse QKV and Gate/Up projections into concatenated matmuls")
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--thinking", action="store_true")
     parser.add_argument("--quantization", choices=["none", "int8", "int4", "fp8", "fp8_e4m3", "fp8_e5m2", "mxfp8", "nvfp4"], default="none")
@@ -38,6 +40,7 @@ def main():
         linear_backend=args.linear_backend,
         num_blocks=args.num_blocks, block_size=args.block_size,
         enable_thinking=args.thinking, local_files_only=args.local_files_only,
+        fuse_projections=args.fuse_projections,
         quantization=None if args.quantization == "none" else QuantConfig(
             args.quantization, activation_dtype=args.dtype, group_size=args.quant_group_size),
     )

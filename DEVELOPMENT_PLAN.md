@@ -96,6 +96,10 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 | 15 | Transformers、具体 MiniVLLM、vLLM/SGLang/TensorRT-LLM 正式对比 | 待实现 |
 | 16 | 精度感知 KV、FP8/INT8 KV、NVFP4/MXFP8 | 待实现 |
 | 17 | 投机解码 | 已列入计划；尚未实现 |
+| 18 | Projection Fusion：QKV、Gate/Up 合并矩阵乘，减少 decode GEMM/launch | 实现中；已接入可选路径，待完整模型 benchmark |
+| 19 | 真实 batch CUDA Graph：eager/Graph 公平 TPOT、TPS、P50/P95 | 待实现 |
+| 20 | PagedAttention kernel：vectorized load、flash-decoding、block size sweep | 待实现 |
+| 21 | 高性能量化：INT4/FP8 Tensor Core GEMM、FP8/INT8 KV、NVFP4/MXFP8 探索 | 待实现 |
 
 后续可按实测瓶颈调整算子顺序，并更新本文件。vLLM 不作为 Windows 引擎运行依赖；若比较环境使用不同 OS，必须披露差异，不能宣称严格同环境。
 
@@ -140,8 +144,23 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 | 15 | 完整 Qwen3 benchmark，与 Transformers、具体 MiniVLLM、vLLM/SGLang/TensorRT-LLM 对比 |
 | 16 | 精度感知 KV、FP8/INT8 KV、NVFP4/MXFP8 能力 |
 | 17 | 投机解码：greedy 多 token 验证、KV 回退、confidence-scheduled draft length、随机采样校正 |
+| 18 | Projection Fusion：QKV、Gate/Up 合并 GEMM，先优化瘦 GEMM 的 launch 和权重读取 |
+| 19 | CUDA Graph batch benchmark：把真实 scheduler/runtime 接入固定 bucket，测 eager 对照 |
+| 20 | PagedAttention：vectorized KV load、split-KV/flash-decoding、block size 16/32/64/128/256 |
+| 21 | 量化 GEMM/KV：INT4、FP8、FP8/INT8 KV，最后评估 NVFP4/MXFP8 的可用 Windows 路径 |
 
-系统创新主线为：CUDA kernels + Paged KV Cache + Continuous Batching + Prefix Cache + CUDA Graph + Precision-aware KV + Windows local application。
+系统创新主线为：CUDA kernels + Paged KV Cache + Continuous Batching + Prefix Cache + CUDA Graph + Projection Fusion + Precision-aware KV + Windows local application。
+
+### 性能优化执行顺序
+
+MiniVLLM 的 RTX 5080 profiler 显示，eager decode 的主要问题是 CPU kernel launch 空洞，GPU 时间主要集中在小 batch GEMM；其 PagedAttention 只占较小比例。因此优化顺序固定为：
+
+1. **先做可验证的 projection fusion**：将每层 Q/K/V 合并为一次 QKV matmul，将 Gate/Up 合并为一次 matmul；保留未融合和量化 reference 回退路径，先验证 logits/greedy 一致，再测 TPOT。
+2. **再做真实 batch CUDA Graph**：benchmark 必须调用 `NativeBatchRuntime`，统一 batch、prompt、输出长度、dtype 和 block size，比较 eager 与 Graph 的 TPOT、聚合 TPS 和分位数延迟。
+3. **随后优化 PagedAttention**：先做向量化 KV load 和 block size sweep，再做 batch=1 的 split-KV/flash-decoding；每个改动都要和当前 CUDA kernel 做对拍。
+4. **最后做量化 GEMM 和低精度 KV**：INT4/FP8 Tensor Core GEMM、FP8/INT8 KV 需要分别记录权重误差、模型输出、显存和端到端收益；不能把当前 dequant reference 当作加速结果。
+
+每个优化阶段都必须同时保留 baseline、正确性证据和可复现 benchmark，单算子加速不直接等同于端到端收益。
 
 ### 投机解码子路线
 

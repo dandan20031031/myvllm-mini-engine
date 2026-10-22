@@ -24,7 +24,7 @@ class NativeQwen3Runner:
     @classmethod
     def from_pretrained(cls, path, *, device="cuda", dtype=torch.bfloat16, prefill_backend="auto", decode_backend="torch", elementwise_backend="torch", data_backend="torch", linear_backend="torch",
                         num_blocks=256, block_size=16, enable_thinking=False, local_files_only=False,
-                        quantization=None):
+                        quantization=None, fuse_projections=False):
         from ..runtime import configure_local_cache
         configure_local_cache()
         if quantization is not None:
@@ -54,6 +54,8 @@ class NativeQwen3Runner:
             path, torch_dtype=dtype, local_files_only=local_files_only,
         ).to(device).eval()
         native = NativeQwen3.from_hf_model(reference, prefill_backend, decode_backend, elementwise_backend, data_backend, linear_backend)
+        if fuse_projections:
+            native.enable_projection_fusion()
         stop_ids = reference.generation_config.eos_token_id
         del reference
         if quantization is not None:

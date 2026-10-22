@@ -12,7 +12,7 @@ from torch import nn
 from ..cache import KVCachePool
 from ..kernels.data import apply_rope as apply_rope_backend, embedding_lookup, write_kv_cache_batch
 from ..kernels.elementwise import residual_add, residual_rms_norm, rms_norm, silu_and_mul
-from ..kernels.linear import make_linear
+from ..kernels.linear import FusedLinear, make_linear
 from ..kernels.paged import paged_attention
 from ..kernels.prefill import prefill_attention
 
@@ -78,13 +78,47 @@ class Attention(nn.Module):
         self.o_proj = make_linear(config.num_attention_heads * config.head_dim, config.hidden_size, bias=config.attention_bias, backend=linear_backend)
         self.q_norm = RMSNorm(config.head_dim, config.rms_norm_eps, elementwise_backend)
         self.k_norm = RMSNorm(config.head_dim, config.rms_norm_eps, elementwise_backend)
+        self.qkv_proj = None
+
+    @property
+    def projection_fused(self):
+        return self.qkv_proj is not None
+
+    def fuse_qkv(self):
+        """Replace Q/K/V projections with one concatenated matmul."""
+        if self.qkv_proj is not None:
+            return False
+        self.qkv_proj = FusedLinear.from_linears(
+            (self.q_proj, self.k_proj, self.v_proj), backend=self.linear_backend
+        )
+        del self.q_proj
+        del self.k_proj
+        del self.v_proj
+        return True
+
+    def _project_qkv(self, x):
+        cfg = self.config
+        if self.qkv_proj is None:
+            q = self.q_proj(x).view(x.shape[0], cfg.num_attention_heads, cfg.head_dim)
+            k = self.k_proj(x).view(x.shape[0], cfg.num_key_value_heads, cfg.head_dim)
+            v = self.v_proj(x).view(x.shape[0], cfg.num_key_value_heads, cfg.head_dim)
+            return q, k, v
+        q_size = cfg.num_attention_heads * cfg.head_dim
+        k_size = cfg.num_key_value_heads * cfg.head_dim
+        qkv = self.qkv_proj(x)
+        q_raw, k_raw, v_raw = qkv.split((q_size, k_size, k_size), dim=-1)
+        return (
+            q_raw.contiguous().view(x.shape[0], cfg.num_attention_heads, cfg.head_dim),
+            k_raw.contiguous().view(x.shape[0], cfg.num_key_value_heads, cfg.head_dim),
+            v_raw.contiguous().view(x.shape[0], cfg.num_key_value_heads, cfg.head_dim),
+        )
 
     def forward(self, x, cos, sin, cache, block_ids, position, layer, backend, decode_backend):
         cfg = self.config
         length = x.shape[0]
-        q = self.q_norm(self.q_proj(x).view(length, cfg.num_attention_heads, cfg.head_dim))
-        k = self.k_norm(self.k_proj(x).view(length, cfg.num_key_value_heads, cfg.head_dim))
-        v = self.v_proj(x).view(length, cfg.num_key_value_heads, cfg.head_dim)
+        q, k, v = self._project_qkv(x)
+        q = self.q_norm(q)
+        k = self.k_norm(k)
         rope_cos = cos.squeeze(1) if self.data_backend == "cuda" else cos
         rope_sin = sin.squeeze(1) if self.data_backend == "cuda" else sin
         q, k = apply_rope_backend(q, k, rope_cos, rope_sin, backend=self.data_backend, validate=False)
@@ -109,9 +143,9 @@ class Attention(nn.Module):
     def forward_decode_batch(self, x, cos, sin, cache, block_tables, positions, layer, decode_backend):
         cfg = self.config
         batch = x.shape[0]
-        q = self.q_norm(self.q_proj(x).view(batch, cfg.num_attention_heads, cfg.head_dim))
-        k = self.k_norm(self.k_proj(x).view(batch, cfg.num_key_value_heads, cfg.head_dim))
-        v = self.v_proj(x).view(batch, cfg.num_key_value_heads, cfg.head_dim)
+        q, k, v = self._project_qkv(x)
+        q = self.q_norm(q)
+        k = self.k_norm(k)
         rope_cos = cos if self.data_backend == "cuda" else cos.unsqueeze(1)
         rope_sin = sin if self.data_backend == "cuda" else sin.unsqueeze(1)
         q, k = apply_rope_backend(q, k, rope_cos, rope_sin, backend=self.data_backend, validate=False)
@@ -134,9 +168,32 @@ class MLP(nn.Module):
         self.up_proj = make_linear(config.hidden_size, config.intermediate_size, bias=False, backend=linear_backend)
         self.down_proj = make_linear(config.intermediate_size, config.hidden_size, bias=False, backend=linear_backend)
         self.elementwise_backend = elementwise_backend
+        self.gate_up_proj = None
+
+    @property
+    def projection_fused(self):
+        return self.gate_up_proj is not None
+
+    def fuse_gate_up(self):
+        """Replace Gate and Up projections with one concatenated matmul."""
+        if self.gate_up_proj is not None:
+            return False
+        self.gate_up_proj = FusedLinear.from_linears(
+            (self.gate_proj, self.up_proj), backend=self.down_proj.backend if hasattr(self.down_proj, "backend") else "torch"
+        )
+        del self.gate_proj
+        del self.up_proj
+        return True
 
     def forward(self, x):
-        return self.down_proj(silu_and_mul(self.gate_proj(x), self.up_proj(x), backend=self.elementwise_backend))
+        if self.gate_up_proj is None:
+            gate, up = self.gate_proj(x), self.up_proj(x)
+        else:
+            fused = self.gate_up_proj(x)
+            # The two halves of a chunk are strided views. The custom CUDA
+            # SiLU*Up kernel intentionally requires contiguous inputs.
+            gate, up = (part.contiguous() for part in fused.chunk(2, dim=-1))
+        return self.down_proj(silu_and_mul(gate, up, backend=self.elementwise_backend))
 
 
 class DecoderLayer(nn.Module):
@@ -195,6 +252,7 @@ class NativeQwen3(nn.Module):
             raise ValueError("linear backend must be torch or cuda")
         self.linear_backend = linear_backend
         self.quantization_report = None
+        self.projection_fusion_enabled = False
         self.model = Qwen3Backbone(config, elementwise_backend, data_backend, linear_backend)
         self.lm_head = make_linear(config.hidden_size, config.vocab_size, bias=False, backend=linear_backend)
         if config.tie_word_embeddings:
@@ -212,6 +270,21 @@ class NativeQwen3(nn.Module):
     def quantize(self, config):
         from ..quantization.linear import quantize_model_linears
         return quantize_model_linears(self, config)
+
+    def enable_projection_fusion(self):
+        """Fuse QKV and Gate/Up projections after HF weights are loaded.
+
+        Quantized reference modules intentionally remain unfused for now so
+        their per-format packing and state reports stay explicit.
+        """
+        if self.quantization_report is not None:
+            raise ValueError("projection fusion is only available before quantization")
+        changed = 0
+        for layer in self.model.layers:
+            changed += int(layer.self_attn.fuse_qkv())
+            changed += int(layer.mlp.fuse_gate_up())
+        self.projection_fusion_enabled = True
+        return changed
 
     def create_cache(self, num_blocks, block_size):
         weight = self.model.embed_tokens.weight

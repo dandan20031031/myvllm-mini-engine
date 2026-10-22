@@ -40,6 +40,7 @@ def main():
     parser.add_argument("--prefill-backend", choices=["auto", "math", "cuda"], default="auto")
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--cuda-graph", action="store_true")
+    parser.add_argument("--fuse-projections", action="store_true")
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "benchmarks" / "results" / "native_qwen3.json")
     args = parser.parse_args()
@@ -54,6 +55,7 @@ def main():
         prefill_backend=args.prefill_backend, decode_backend=args.decode_backend,
         elementwise_backend=args.elementwise_backend, data_backend=args.data_backend,
         linear_backend=args.linear_backend, local_files_only=args.local_files_only,
+        fuse_projections=args.fuse_projections,
     )
     for prompt in prompts:
         for _ in range(args.warmup):
@@ -69,7 +71,7 @@ def main():
             total_ms = (time.perf_counter() - start) * 1000
             samples.append({"total_ms": total_ms, "ttft_ms": result.ttft_ms, "tpot_ms": result.tpot_ms, "output_tokens": len(result.token_ids), "finish_reason": result.finish_reason})
         rows.append({"prompt": prompt, "samples": samples, "median_total_ms": statistics.median(item["total_ms"] for item in samples), "median_ttft_ms": statistics.median(item["ttft_ms"] for item in samples), "median_tpot_ms": statistics.median(item["tpot_ms"] for item in samples), "median_output_tokens": statistics.median(item["output_tokens"] for item in samples)})
-    payload = {"model": args.model, "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None, "pytorch": torch.__version__, "cuda_runtime": torch.version.cuda, "dtype": args.dtype, "backends": {"prefill": args.prefill_backend, "decode": args.decode_backend, "elementwise": args.elementwise_backend, "data": args.data_backend, "linear": args.linear_backend}, "cuda_graph_requested": args.cuda_graph, "batch_size": args.batch_size, "warmup": args.warmup, "repetitions": args.repetitions, "rows": rows, "note": "Requires complete local weights; results are native single-request measurements, not vLLM comparisons."}
+    payload = {"model": args.model, "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None, "pytorch": torch.__version__, "cuda_runtime": torch.version.cuda, "dtype": args.dtype, "backends": {"prefill": args.prefill_backend, "decode": args.decode_backend, "elementwise": args.elementwise_backend, "data": args.data_backend, "linear": args.linear_backend}, "cuda_graph_requested": args.cuda_graph, "projection_fusion_requested": args.fuse_projections, "batch_size": args.batch_size, "warmup": args.warmup, "repetitions": args.repetitions, "rows": rows, "note": "Requires complete local weights; results are native single-request measurements, not vLLM comparisons."}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(payload, ensure_ascii=False, indent=2))

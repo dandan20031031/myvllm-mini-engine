@@ -19,6 +19,7 @@
 - [阶段 11：CUDA Graph Decode Buckets](reports/STAGE_11_CUDA_GRAPH_BUCKETS.md)
 - [阶段 12+13：Windows CUDA Prefill、显式 CUDA Linear 与本地 Chat](reports/STAGE_12_13_PREFILL_LINEAR_CHAT.md)
 - [阶段 11/12/13 补充：Graph Runtime、真实模型验收与 Benchmark](reports/STAGE_11_12_13_GRAPH_VALIDATION_BENCHMARK.md)
+- [阶段 18：Projection Fusion](reports/STAGE_18_PROJECTION_FUSION.md)
 
 - continuous batching 的请求调度器；
 - 固定大小 Paged KV block allocator；
@@ -33,6 +34,7 @@
 - 可选 CUDA data backend：Embedding gather、RoPE 和分页 KV 写入。
 - 参考版 prefill + `past_key_values` 单 token 增量生成，以及 TTFT/TPOT 统计。
 - backend-agnostic benchmark 工具，可统一记录延迟、吞吐和 CUDA 峰值显存。
+- 可选 projection fusion：将 QKV、Gate/Up 合并为较少的 CUDA matmul，使用 `--fuse-projections` 开启。
 
 ## 开源与模型说明
 
@@ -139,6 +141,20 @@ python -m mini_engine `
 ```
 
 `auto` 会使用当前 Windows PyTorch wheel 可用的 SDPA backend；`flash` 只有在 `torch.backends.cuda.is_flash_attention_available()` 为 true 时才可用。当前环境的 Windows wheel 未编译 Flash backend，因此请使用 `auto`，不要把 math fallback 当作 Flash 性能结果。
+
+在 CUDA decode benchmark 中可以开启 projection fusion：
+
+```powershell
+python -m mini_engine `
+  --model "D:\models\Qwen3-0.6B" `
+  --prompt "介绍一下 KV Cache" `
+  --device cuda --dtype bf16 `
+  --prefill-backend cuda --decode-backend cuda `
+  --elementwise-backend cuda --data-backend cuda --linear-backend cuda `
+  --fuse-projections --local-files-only
+```
+
+该路径当前仍需用完整模型 benchmark 验收，不预先承诺固定加速比例。
 
 当前已通过小型随机 Qwen3 的 CPU FP32 / GPU BF16 / GPU FP16 对齐，并在 RTX 5080 上完成完整 Qwen3-0.6B 的本地生成验收。公开仓库不包含模型权重；上面的模型路径只是示例，请替换成你自己的目录。
 
