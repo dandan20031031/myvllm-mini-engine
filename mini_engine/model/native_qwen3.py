@@ -248,7 +248,7 @@ class NativeQwen3(nn.Module):
         if data_backend not in {"torch", "cuda"}:
             raise ValueError("data backend must be torch or cuda")
         self.data_backend = data_backend
-        if linear_backend not in {"torch", "cuda"}:
+        if linear_backend not in {"torch", "cuda", "dandan", "dandan_cuda", "dandan_tma"}:
             raise ValueError("linear backend must be torch or cuda")
         self.linear_backend = linear_backend
         self.quantization_report = None
@@ -331,7 +331,14 @@ class NativeQwen3(nn.Module):
             raise ValueError("positions must be int64 with one value per request")
         if block_tables.ndim != 2 or block_tables.shape[0] != input_ids.shape[0]:
             raise ValueError("block_tables must be [batch, max_blocks]")
-        if bool((positions < 0).any()) or bool((positions + 1 > self.config.max_position_embeddings).any()):
+        # GPU-to-CPU metadata checks are useful on the public eager path but
+        # are illegal during CUDA Graph capture. The graph bucket owns fixed
+        # trusted buffers, so defer this validation until replay is complete.
+        # This check is intentionally kept in Python because it is a cheap
+        # local status query in PyTorch's CUDA wrapper. Avoid any tensor
+        # reduction or `.item()` while capture is active.
+        capturing = bool(input_ids.is_cuda and torch.cuda.is_current_stream_capturing())
+        if not capturing and (bool((positions < 0).any()) or bool((positions + 1 > self.config.max_position_embeddings).any())):
             raise ValueError("decode positions exceed model context")
         cfg, shape = self.config, cache.shape
         if (shape.num_layers, shape.num_kv_heads, shape.head_dim) != (cfg.num_hidden_layers, cfg.num_key_value_heads, cfg.head_dim):

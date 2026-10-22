@@ -20,6 +20,7 @@
 - [阶段 12+13：Windows CUDA Prefill、显式 CUDA Linear 与本地 Chat](reports/STAGE_12_13_PREFILL_LINEAR_CHAT.md)
 - [阶段 11/12/13 补充：Graph Runtime、真实模型验收与 Benchmark](reports/STAGE_11_12_13_GRAPH_VALIDATION_BENCHMARK.md)
 - [阶段 18：Projection Fusion](reports/STAGE_18_PROJECTION_FUSION.md)
+- [阶段 19：真实 Batch CUDA Graph Benchmark](reports/STAGE_19_BATCH_CUDA_GRAPH_BENCHMARK.md)
 
 - continuous batching 的请求调度器；
 - 固定大小 Paged KV block allocator；
@@ -157,6 +158,8 @@ python -m mini_engine `
 该路径当前仍需用完整模型 benchmark 验收，不预先承诺固定加速比例。
 
 当前已通过小型随机 Qwen3 的 CPU FP32 / GPU BF16 / GPU FP16 对齐，并在 RTX 5080 上完成完整 Qwen3-0.6B 的本地生成验收。公开仓库不包含模型权重；上面的模型路径只是示例，请替换成你自己的目录。
+
+当前 native batch runtime 已支持真实 CUDA Graph decode。RTX 5080、Qwen3-0.6B、BF16、3 条请求、32 个输出 token 的首轮结果：eager 约 `189 tokens/s`，CUDA Graph 约 `474 tokens/s`，projection fusion + Graph 约 `519 tokens/s`。这是本项目统一脚本的 batch 基线，不是 vLLM 对比结果。
 
 CUDA 全后端真实 benchmark 结果保存在 `benchmarks/results/native_qwen3_cuda.json`。RTX 5080 BF16 下，短样本 median TPOT 约 20–21 ms/token；这是 native 单请求结果，不是 vLLM 对比结果。
 

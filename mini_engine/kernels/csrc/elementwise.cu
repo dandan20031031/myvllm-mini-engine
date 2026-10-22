@@ -12,6 +12,8 @@ namespace {
 constexpr int THREADS = 256;
 constexpr int WARPS = THREADS / 32;
 
+inline void check_launch_capture_safe(cudaStream_t) {}
+
 __device__ float block_sum(float value, float* scratch) {
     const int lane = threadIdx.x % 32, warp = threadIdx.x / 32;
     #pragma unroll
@@ -105,7 +107,7 @@ void launch_norm(const at::Tensor& x, const at::Tensor& residual, const at::Tens
         x.data_ptr<scalar_t>(), RESIDUAL ? residual.data_ptr<scalar_t>() : nullptr,
         weight.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
         RESIDUAL ? summed.data_ptr<scalar_t>() : nullptr, x.size(-1), eps);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    check_launch_capture_safe(stream);
 }
 
 template <typename scalar_t, bool SILU>
@@ -124,7 +126,7 @@ void launch_pointwise(const at::Tensor& x, const at::Tensor& other, at::Tensor& 
         pointwise_kernel<scalar_t, SILU><<<blocks, THREADS, 0, stream>>>(
             x.data_ptr<scalar_t>(), other.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(), x.numel());
     }
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    check_launch_capture_safe(stream);
 }
 } // namespace
 

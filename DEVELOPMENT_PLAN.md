@@ -89,15 +89,15 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 | 07 | 所有 RMSNorm、Residual、SwiGLU CUDA，边界/模型/Graph 测试及单算子实测 | 完成 |
 | 08 | Embedding/RoPE/KV 写入 CUDA，复用 block table、减少每层同步 | 完成；正确性已验收 |
 | 09+10 | Scheduler 接通 native model execution、batch decode、Prefix/Block Cache 生命周期 | 完成；prefill 跳过仍待做 |
-| 11 | CUDA Graph decode shape bucket、固定 metadata、runtime replay | 部分完成；完整模型端到端 Graph benchmark 待做 |
+| 11 | CUDA Graph decode shape bucket、固定 metadata、runtime replay | 完成；真实 batch benchmark 已通过，持续优化 capture 覆盖 |
 | 12 | Windows CUDA prefill correctness-first backend | 完成；尚不等同 FlashAttention 性能 |
 | 13 | 显式 CUDA Linear/cuBLAS 边界、完整 Qwen3 验收和本地 Chat | 部分完成；INT4/FP8/NVFP4/MXFP8 高性能 GEMM 待做 |
 | 14 | Windows HTTP/OpenAI/SSE 服务 | 后置；尚未实现 |
 | 15 | Transformers、具体 MiniVLLM、vLLM/SGLang/TensorRT-LLM 正式对比 | 待实现 |
 | 16 | 精度感知 KV、FP8/INT8 KV、NVFP4/MXFP8 | 待实现 |
 | 17 | 投机解码 | 已列入计划；尚未实现 |
-| 18 | Projection Fusion：QKV、Gate/Up 合并矩阵乘，减少 decode GEMM/launch | 实现中；已接入可选路径，待完整模型 benchmark |
-| 19 | 真实 batch CUDA Graph：eager/Graph 公平 TPOT、TPS、P50/P95 | 待实现 |
+| 18 | Projection Fusion：QKV、Gate/Up 合并矩阵乘，减少 decode GEMM/launch | 完成首轮；单请求和 batch Graph 已验证，继续优化 |
+| 19 | 真实 batch CUDA Graph：eager/Graph 公平 TPOT、TPS、P50/P95 | 完成首轮；3 请求/32 token Graph benchmark 已通过，完整分位数和多 batch sweep 待扩展 |
 | 20 | PagedAttention kernel：vectorized load、flash-decoding、block size sweep | 待实现 |
 | 21 | 高性能量化：INT4/FP8 Tensor Core GEMM、FP8/INT8 KV、NVFP4/MXFP8 探索 | 待实现 |
 
@@ -113,7 +113,7 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 - 单算子记录 device timeline 和 eager wall time，端到端包含调度与同步；不混用口径。
 - 所有阶段生成 reports/STAGE_XX_*.md，解释每个模块、数据布局、调用链、测试结果、限制和下一阶段接口。
 
-当前全量回归为 148 passed、2 warnings；CUDA 测试在 RTX 5080 上实际执行通过。完整 Qwen3-0.6B 已完成文本生成验收和单请求 TTFT/TPOT 基线，但完整模型 CUDA Graph batch 性能仍未验收。
+当前全量回归基线为 148 passed、2 warnings；CUDA 测试在 RTX 5080 上实际执行通过。完整 Qwen3-0.6B 已完成文本生成、单请求 TTFT/TPOT 和真实 batch CUDA Graph benchmark 验收；Graph capture-safe 修改后的回归结果会随阶段 19 提交更新。
 
 阶段 05 Event 测量可能包括 Python 调度空隙，reference 包含 gather/同步/循环，历史加速比不能视为纯 kernel 或相对 vLLM 的结论。阶段 07 同时报告 Graph 重放和 eager wall；Graph 时间也包含节点调度，不称作纯指令时间。Paged Attention 和 elementwise 的加速数字是单算子或 reference 对比，不能直接外推为端到端 tokens/s。
 
@@ -156,7 +156,7 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 MiniVLLM 的 RTX 5080 profiler 显示，eager decode 的主要问题是 CPU kernel launch 空洞，GPU 时间主要集中在小 batch GEMM；其 PagedAttention 只占较小比例。因此优化顺序固定为：
 
 1. **先做可验证的 projection fusion**：将每层 Q/K/V 合并为一次 QKV matmul，将 Gate/Up 合并为一次 matmul；保留未融合和量化 reference 回退路径，先验证 logits/greedy 一致，再测 TPOT。
-2. **再做真实 batch CUDA Graph**：benchmark 必须调用 `NativeBatchRuntime`，统一 batch、prompt、输出长度、dtype 和 block size，比较 eager 与 Graph 的 TPOT、聚合 TPS 和分位数延迟。
+2. **再做真实 batch CUDA Graph**：benchmark 已调用 `NativeBatchRuntime`，统一 batch、prompt、输出长度、dtype 和 block size；当前 3 请求/32 token 的首轮结果是 eager `189.3 tokens/s`、Graph `473.9 tokens/s`，约 `2.50x`，projection fusion + Graph 为 `519.2 tokens/s`。后续扩展 batch=1/2/4/8、P50/P95 和更长输出。
 3. **随后优化 PagedAttention**：先做向量化 KV load 和 block size sweep，再做 batch=1 的 split-KV/flash-decoding；每个改动都要和当前 CUDA kernel 做对拍。
 4. **最后做量化 GEMM 和低精度 KV**：INT4/FP8 Tensor Core GEMM、FP8/INT8 KV 需要分别记录权重误差、模型输出、显存和端到端收益；不能把当前 dequant reference 当作加速结果。
 

@@ -45,8 +45,12 @@ class NativeQwen3Runner:
                 raise ValueError("CUDA data kernels require CUDA device and FP16/BF16 weights")
             from ..kernels.cuda_extension import load_cuda_extension
             load_cuda_extension()
-        if linear_backend == "cuda" and not str(device).startswith("cuda"):
+        if linear_backend in {"cuda", "dandan", "dandan_cuda", "dandan_tma"} and not str(device).startswith("cuda"):
             raise ValueError("CUDA linear backend requires a CUDA device")
+        if linear_backend in {"dandan", "dandan_cuda", "dandan_tma"}:
+            if dtype != torch.float16:
+                raise ValueError("dandan linear backend currently requires --dtype fp16; BF16 support is planned")
+            import dandan_ops  # noqa: F401 - fail before loading model on missing package
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=local_files_only)
@@ -159,7 +163,9 @@ class NativeQwen3Runner:
             if graph_padding_blocks <= 0:
                 graph_padding_blocks = max(graph_manager.block_buckets)
             graph_padding_block_ids = self.block_manager.allocate(
-                "__graph_padding__", graph_padding_blocks
+                # BlockManager.allocate receives a token count, while the
+                # graph manager expresses scratch capacity in physical pages.
+                "__graph_padding__", graph_padding_blocks * self.block_manager.block_size
             )
         runtime = NativeBatchRuntime(
             self.model, scheduler, self.cache,

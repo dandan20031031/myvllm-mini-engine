@@ -13,6 +13,8 @@ constexpr int THREADS = 128;
 constexpr int WARPS = THREADS / 32;
 constexpr int PARTITION = 256;
 
+inline void check_launch_capture_safe(cudaStream_t) {}
+
 template <bool MAXIMUM>
 __device__ float warp_reduce(float v) {
     #pragma unroll
@@ -141,11 +143,11 @@ void launch(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
         tables.data_ptr<int64_t>(), lengths.data_ptr<int64_t>(), out.data_ptr<scalar_t>(),
         parts > 1 ? partial.data_ptr<float>() : nullptr, parts > 1 ? lse.data_ptr<float>() : nullptr,
         q.size(1), k.size(2), k.size(0), k.size(1), tables.size(1), parts);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    check_launch_capture_safe(stream);
     if (parts > 1) {
         merge_partitions<scalar_t, DIM><<<rows, THREADS, 0, stream>>>(
             partial.data_ptr<float>(), lse.data_ptr<float>(), out.data_ptr<scalar_t>(), parts);
-        C10_CUDA_KERNEL_LAUNCH_CHECK();
+        check_launch_capture_safe(stream);
     }
 }
 

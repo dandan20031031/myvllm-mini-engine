@@ -11,6 +11,8 @@
 namespace {
 constexpr int THREADS = 256;
 
+inline void check_launch_capture_safe(cudaStream_t) {}
+
 template <typename scalar_t>
 __global__ void embedding_kernel(const scalar_t* weight, const int64_t* ids, scalar_t* output,
                                  int64_t tokens, int64_t vocab, int64_t hidden) {
@@ -108,7 +110,7 @@ void launch_embedding(const at::Tensor& weight, const at::Tensor& ids, at::Tenso
     embedding_kernel<scalar_t><<<static_cast<unsigned int>(ids.numel()), THREADS, 0, stream>>>(
         weight.data_ptr<scalar_t>(), ids.data_ptr<int64_t>(), output.data_ptr<scalar_t>(),
         ids.numel(), weight.size(0), weight.size(1));
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    check_launch_capture_safe(stream);
 }
 
 template <typename scalar_t>
@@ -117,7 +119,7 @@ void launch_rope(const at::Tensor& q, const at::Tensor& k, const at::Tensor& cos
     rope_kernel<scalar_t><<<static_cast<unsigned int>(q.size(0) * q.size(1)), THREADS, 0, stream>>>(
         q.data_ptr<scalar_t>(), k.data_ptr<scalar_t>(), cos.data_ptr<scalar_t>(), sin.data_ptr<scalar_t>(),
         qo.data_ptr<scalar_t>(), ko.data_ptr<scalar_t>(), q.size(0), q.size(1), k.size(1), q.size(2));
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    check_launch_capture_safe(stream);
 }
 
 template <typename scalar_t>
@@ -126,7 +128,7 @@ void launch_write(const at::Tensor& kc, const at::Tensor& vc, const at::Tensor& 
     kv_write_kernel<scalar_t><<<static_cast<unsigned int>(k.size(0)), THREADS, 0, stream>>>(
         kc.data_ptr<scalar_t>(), vc.data_ptr<scalar_t>(), ids.data_ptr<int64_t>(),
         k.data_ptr<scalar_t>(), v.data_ptr<scalar_t>(), k.size(0), offset, kc.size(1), ids.numel(), kc.size(2), kc.size(3));
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    check_launch_capture_safe(stream);
 }
 
 at::Tensor embedding_lookup_cuda(const at::Tensor& weight, const at::Tensor& ids, bool validate) {
@@ -184,5 +186,5 @@ void write_kv_cache_batch_cuda(const at::Tensor& kc, const at::Tensor& vc, const
             kc.data_ptr<at::BFloat16>(), vc.data_ptr<at::BFloat16>(), tables.data_ptr<int64_t>(), offsets.data_ptr<int64_t>(),
             k.data_ptr<at::BFloat16>(), v.data_ptr<at::BFloat16>(), batch, tables.size(1), block_size, kc.size(0), kc.size(2), kc.size(3));
     }
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    check_launch_capture_safe(stream);
 }

@@ -29,6 +29,24 @@ def test_graph_bucket_requires_cuda_and_padding():
         DecodeGraphBucket(FakeModel(), FakeCache(), 2, 8)
 
 
+def test_runner_graph_padding_capacity_is_in_physical_blocks():
+    from mini_engine.model import NativeQwen3, NativeQwen3Runner, Qwen3Config
+
+    class TinyTokenizer:
+        eos_token_id = None
+
+    model = NativeQwen3(Qwen3Config(17, 16, 32, 1, 2, 1, 8), "math")
+    runner = NativeQwen3Runner(model, TinyTokenizer(), num_blocks=32, block_size=4)
+    class FakeGraphManager:
+        block_buckets = (8,)
+
+    runtime = runner.create_batch_runtime(
+        graph_manager=FakeGraphManager(),
+    )
+    assert len(runtime.graph_padding_block_ids) == 8
+    assert runner.block_manager.refcount(runtime.graph_padding_block_ids[0]) == 1
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_cuda_graph_bucket_replay_fixed_buffers():
     class FakeModel:

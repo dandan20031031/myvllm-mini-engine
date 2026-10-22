@@ -132,7 +132,12 @@ void write_kv_cache_batch_checked(const at::Tensor& key_cache, const at::Tensor&
     TORCH_CHECK(key.size(1) == key_cache.size(2) && key.size(2) == key_cache.size(3), "batch K/V shape mismatch");
     TORCH_CHECK(key_cache.scalar_type() == at::kHalf || key_cache.scalar_type() == at::kBFloat16, "batch KV cache requires FP16/BF16");
     TORCH_CHECK(key.scalar_type() == key_cache.scalar_type() && value.scalar_type() == key_cache.scalar_type(), "batch KV dtype mismatch");
-    TORCH_CHECK(!((offsets < 0) | (offsets >= tables.size(1) * block_size)).any().item<bool>(), "batch KV offset out of range");
+    if (validate) {
+        // This reduction synchronizes the host and is not legal while a CUDA
+        // Graph is being captured. Trusted native graph inputs are already
+        // bounded by the scheduler and kernel guards.
+        TORCH_CHECK(!((offsets < 0) | (offsets >= tables.size(1) * block_size)).any().item<bool>(), "batch KV offset out of range");
+    }
     write_kv_cache_batch_cuda(key_cache, value_cache, tables, offsets, key, value, block_size, validate);
 }
 

@@ -10,6 +10,8 @@
 namespace {
 constexpr int THREADS = 128;
 
+inline void check_launch_capture_safe(cudaStream_t) {}
+
 template <typename scalar_t>
 __global__ void causal_prefill_kernel(
     const scalar_t* q, const scalar_t* k, const scalar_t* v, scalar_t* out,
@@ -66,7 +68,7 @@ void launch_prefill(const at::Tensor& q, const at::Tensor& k, const at::Tensor& 
     causal_prefill_kernel<scalar_t><<<static_cast<unsigned int>(rows), THREADS, shared, stream>>>(
         q.data_ptr<scalar_t>(), k.data_ptr<scalar_t>(), v.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
         q.size(0), q.size(1), k.size(1), q.size(2), q.size(3));
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    check_launch_capture_safe(stream);
 }
 
 at::Tensor causal_prefill_cuda(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v) {

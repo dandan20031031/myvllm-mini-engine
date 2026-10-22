@@ -63,7 +63,10 @@ Graph 外的 CPU scheduler 仍负责请求进入/退出、BlockManager、Prefix 
 - `NativeBatchRuntime.decode_step` 已支持选择 Graph manager、首次 capture 和后续 replay；
 - 完整 Qwen3 模型的 Graph batch capture/replay 仍需在真实请求生命周期下验收，尤其要确认所有动态分配、metadata 和 KV 写入都满足 graph-capture 约束；
 - inactive slot 的 scratch KV page 需要由上层显式提供，runner 会预留这组 page；
-- 端到端 Graph TPOT、tokens/s 和 eager 对照尚未写入正式 benchmark 结果。
+- runner 预留 scratch page 时将 graph bucket 的 block 数转换为 allocator 所需的 token capacity，避免单位混用；
+- 端到端 Graph TPOT、tokens/s 和 eager 对照已在阶段 19 报告中记录；后续仍需扩展更多 batch 和分位数场景。
+
+首轮真实模型 batch 验收已完成：Qwen3-0.6B、RTX 5080、BF16、3 请求、32 输出 token、block_size=16 下，eager median 聚合吞吐约 189.3 tokens/s，CUDA Graph 约 473.9 tokens/s，约 2.50x。开启 projection fusion 后 Graph 约 519.2 tokens/s。结果包含逐请求 prefill，不能直接与只统计 decode 的 kernel 或其他项目口径混合。
 
 ## 6. 投机解码计划
 
@@ -77,4 +80,4 @@ Graph 外的 CPU scheduler 仍负责请求进入/退出、BlockManager、Prefix 
 
 ## 7. 测试
 
-CPU 测试覆盖 bucket 选择和非法配置；CUDA 测试覆盖固定 buffer replay 与 active_count padding。当前全量回归为 148 passed、2 warnings；完整模型 Graph TPOT benchmark 留在下一步。
+CPU 测试覆盖 bucket 选择和非法配置；CUDA 测试覆盖固定 buffer replay 与 active_count padding。阶段 19 真实模型 benchmark 已通过；当前全量回归基线为 148 passed、2 warnings，新增 Graph capture-safe 修改后需重新跑完整回归。
