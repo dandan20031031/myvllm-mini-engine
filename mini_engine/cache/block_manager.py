@@ -62,6 +62,8 @@ class BlockManager:
         if request_id in self._owned:
             raise ValueError(f"request already owns blocks: {request_id}")
         prefix = list(prefix_block_ids)
+        if len(set(prefix)) != len(prefix):
+            raise ValueError("prefix pages must be distinct")
         required = self.blocks_required(token_count)
         if len(prefix) > required:
             raise ValueError("prefix has more blocks than the request needs")
@@ -84,6 +86,8 @@ class BlockManager:
         if request_id in self._owned:
             raise ValueError(f"request already owns blocks: {request_id}")
         blocks = list(block_ids)
+        if len(set(blocks)) != len(blocks):
+            raise ValueError("attached pages must be distinct")
         for block in blocks:
             if block < 0 or block >= self.num_blocks or self._refcounts[block] <= 0:
                 raise ValueError(f"cannot attach unallocated block: {block}")
@@ -105,7 +109,7 @@ class BlockManager:
             self._decrement(block)
 
     def _decrement(self, block: int) -> None:
-        if self._refcounts[block] <= 0:
+        if block < 0 or block >= self.num_blocks or self._refcounts[block] <= 0:
             raise ValueError(f"block is not retained: {block}")
         self._refcounts[block] -= 1
         if self._refcounts[block] == 0:
@@ -131,6 +135,25 @@ class BlockManager:
             return
         for block in blocks:
             self._decrement(block)
+
+    def truncate(self, request_id: str, keep_tokens: int) -> list[int]:
+        """Release only full trailing pages after a speculative rollback.
+
+        Data within the retained last page is left alone; the next forward
+        overwrites rejected suffix positions. Other owners and prefix pins
+        keep their own references to any released pages.
+        """
+        count = self.blocks_required(keep_tokens)
+        if request_id not in self._owned:
+            raise KeyError(request_id)
+        current = self._owned[request_id]
+        if count > len(current):
+            raise ValueError("truncate cannot grow a block table")
+        removed = current[count:]
+        del current[count:]
+        for block in removed:
+            self._decrement(block)
+        return list(current)
 
     def refcount(self, block_id: int) -> int:
         if block_id < 0 or block_id >= self.num_blocks:

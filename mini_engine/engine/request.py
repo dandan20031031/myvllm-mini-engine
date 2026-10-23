@@ -26,6 +26,12 @@ class GenerationRequest:
     prefix_len: int = 0
     prefix_cache_key: Optional[tuple[int, ...]] = None
     prefix_block_ids: list[int] = field(default_factory=list)
+    # Prompt ranges scheduled on the current tick. Cursor advances when the
+    # range is reserved; a failed executor aborts the request and releases it.
+    prefill_cursor: int = 0
+    prefill_start: int = 0
+    prefill_end: int = 0
+    prefix_next_logits: object | None = field(default=None, repr=False)
 
     @property
     def prompt_len(self) -> int:
@@ -34,6 +40,11 @@ class GenerationRequest:
     @property
     def total_len(self) -> int:
         return self.prompt_len + self.generated_tokens
+
+    @property
+    def max_cache_tokens(self) -> int:
+        # The last emitted token never needs a forward/KV write.
+        return self.prompt_len + self.max_new_tokens - 1
 
     @property
     def is_finished(self) -> bool:

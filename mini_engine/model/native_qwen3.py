@@ -127,10 +127,14 @@ class Attention(nn.Module):
             cache.write_cuda(layer, block_ids, position, k, v, validate=False)
         else:
             cache.write(layer, block_ids, position, k, v)
-        if position == 0:
+        if position == 0 or length > 1:
+            if position > 0:
+                # Only multi-token suffix prefill/verification gathers KV.
+                # One-token decode continues to read physical pages directly.
+                k, v = cache.gather(layer, block_ids, position + length)
             output = prefill_attention(
                 q.transpose(0, 1).unsqueeze(0), k.transpose(0, 1).unsqueeze(0),
-                v.transpose(0, 1).unsqueeze(0), backend,
+                v.transpose(0, 1).unsqueeze(0), backend, query_start=position,
             ).squeeze(0).transpose(0, 1)
         else:
             table = torch.as_tensor([block_ids], device=x.device, dtype=torch.long)
@@ -313,15 +317,15 @@ class NativeQwen3(nn.Module):
 
     @torch.inference_mode()
     def forward(self, input_ids, cache, block_ids, position=0):
-        """Single unpadded prompt at position=0, or one decode token thereafter.
+        """Unpadded prompt/suffix, or one paged decode token at any position.
 
         The caller must allocate/grow block_ids before calling. Position is the
         number of tokens already written, not the number of sampled outputs.
         """
         if input_ids.ndim != 1 or input_ids.numel() == 0 or input_ids.dtype != torch.long:
             raise ValueError("input_ids must be a nonempty 1D int64 tensor")
-        if position < 0 or (position > 0 and input_ids.numel() != 1):
-            raise ValueError("decode accepts one token and a nonnegative position")
+        if not isinstance(position, int) or isinstance(position, bool) or position < 0:
+            raise ValueError("position must be a nonnegative integer")
         if position + input_ids.numel() > self.config.max_position_embeddings:
             raise ValueError("request exceeds model context limit")
         cfg, shape = self.config, cache.shape
