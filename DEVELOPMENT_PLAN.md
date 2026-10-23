@@ -2,6 +2,53 @@
 
 本文件是当前开发约定；路线变化同步更新，历史阶段报告保留当时状态。
 
+## 2026-10-23：面向实习作品的执行计划（优先于下方历史顺序）
+
+目标是能解释、复现和部署的单卡推理系统。项目不追求复制完整 vLLM/SGLang，也不把尚未测量的优化写成加速结果。保留旧阶段编号及未完成项，下面是本轮实施顺序；每阶段分别提交代码、测试与调用链报告。
+
+### 行业对照与可行性
+
+| 对照 | 可借鉴的机制 | 当前项目的缺口与落地范围 |
+|---|---|---|
+| [vLLM APC](https://docs.vllm.ai/en/latest/features/automatic_prefix_caching/) | 复用前缀KV，避免重复prefill | 现有共享物理页仍重算prompt；实现真正跳过、边界logits、LRU与活跃引用隔离 |
+| [SGLang](https://arxiv.org/abs/2312.07104) | 前缀复用和请求调度协同 | 先复用已有完整block索引；不为小项目重写完整Radix树或声称已实现RadixAttention |
+| [SGLang speculative](https://docs.sglang.io/docs/advanced_features/speculative_decoding) | NGRAM、多种draft、动态验证预算 | 无需训练的prompt lookup适配0.6B；真正多token验证与KV回退优先 |
+| [DeepInfer](https://github.com/deepseek-ai/DeepInfer) | 异步调度、batch invariant、确定性采样、confidence调度 | 借鉴调度/验收设计；DP/CP、MoE EP/EPLB及DeepSeek专用MTP不适合本项目单卡dense模型 |
+
+DeepInfer当前开源目标模型为DeepSeek-V4.1-Flash，官方说明是offline inference，不能当作本机Qwen3公平跑分对象。vLLM/SGLang的外部对照允许另行采集，但必须记录OS、版本、模型、dtype、实际token和计时边界；不把不同系统/模型结果拼成同条件排名。
+
+### 论文与实验选择
+
+| 方法 | 来源与取舍 | 可行性/验收 |
+|---|---|---|
+| Chunked prefill、decode优先 | [SARATHI, 2023](https://arxiv.org/abs/2308.16369)、[FastGen, 2024](https://arxiv.org/abs/2401.08671) | 高；先分块调度和正确suffix attention。不同请求不合并GEMM时不能宣称复现论文的混合batch收益 |
+| Split-KV decode | [Flash-Decoding](https://pytorch.org/blog/flash-decoding/) | 高；已有partition+merge，继续做向量化、形状对照和block size sweep，属于工程改进而非新算法 |
+| 精确投机解码 | [Speculative Sampling, 2023](https://arxiv.org/abs/2302.01318) | 高；greedy prompt lookup先落地。随机版必须有p/q接受率和拒绝分布校正，不能靠token相等判定 |
+| 自适应draft预算 | 历史接受长度与验证成本驱动的项目实验 | 中；比较关闭/固定/自适应，报告无命中场景回退和额外成本。不称为DeepInfer confidence实现或论文原创 |
+| EAGLE-3 | [2025论文](https://arxiv.org/abs/2503.01840) | 条件研究；需要与target匹配的特征draft及训练/权重，不能只增加命令行选项就算完成 |
+| DFlash | [2026论文](https://arxiv.org/abs/2602.06036) | 条件研究；block diffusion并行draft需要专用模型与特征接口。0.6B目标很小，先测验证成本再决定训练投入 |
+| 低精度KV | 独立于W4A16权重量化 | 中；先明确逐token/逐head scale、直接paged读取、误差与显存；不靠每层全量反量化声称加速 |
+
+### 本轮实施阶段
+
+| 阶段 | 交付与验收 | 状态 |
+|---|---|---|
+| 23 | Prefix命中实际跳过 + 多token suffix + 有token预算的chunked prefill；逐tokenlogits/共享页不改写/取消回收/内存压力/长prompt推进测试 | 开发中 |
+| 24 | Prompt lookup greedy投机、KV回退、EOS与输出预算、固定/自适应draft；与普通decode对拍，记录接受率和真实端到端耗时 | 开发中 |
+| 25（承接14） | Windows HTTP chat completions子集与SSE；单GPU worker continuous batching、断线取消、有界队列、真实HTTP测试 | 开发中 |
+| 26（承接20） | PagedAttention向量化与可选baseline、block16/32/64/128/256实验；恢复CUDA launch错误检查并验证Graph；CUDA greedy采样 | 开发中 |
+| 27（承接15/19/22） | 固定后端指纹、同口径benchmark/质量与消融实验、可导出的行业对照数据；真实模型集成验收与实习展示报告 | 待执行 |
+
+本轮完成可独立验收的23–27。旧计划的FP8 GEMM、INT8/FP8 KV、NVFP4/MXFP8、训练型draft仍是后续研究工作，不因本轮结束自动标记完成。它们分别需要独立kernel、模型质量验收以及Windows硬件/工具链证据；保留在阶段16/17/21中继续推进，不提供伪实现。已有W4A16不重复开发。
+
+### 验收与简历表达
+
+- 核心证据：相同权重下输出/数值对拍，prefix实际执行token计数，speculative接受/拒绝回退，混合长短请求无饥饿，SSE取消后page引用归还。
+- 性能矩阵：batch1/2/4/8，短/长prompt，共享/不共享前缀，greedy固定输出，BF16/cuBLAS及FP16/dandan/W4A16分别报告；不同精度不能混算优化收益。
+- 统计单次请求TTFT、逐token间隔/TPOT、总TPS、P50/P95、cache hit tokens、显存；明确离线runtime与HTTP服务边界。
+- GPU被其他任务占用或库文件变动时，结果只用于功能验证；不发布性能排名。原始结果放benchmarks/results，精简结果与方法放reports。
+- 实习作品主线：Windows自研CUDA + 真实Paged KV/Graph + 共享前缀与调度 + 精确投机 + 可部署服务。用实际测得的收益写简历，不将论文收益或reference对比冒充超越工业引擎。
+
 ## 1. 项目目标和约束
 
 面向 Qwen3-0.6B 实现单 GPU 推理引擎，重点是自研 CUDA、Paged KV Cache、多精度和可复现实验。先控制模型与分布式范围，再逐项提高性能。
