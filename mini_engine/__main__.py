@@ -32,6 +32,10 @@ def main():
     parser.add_argument("--quantization", choices=["none", "int8", "int4", "fp8", "fp8_e4m3", "fp8_e5m2", "mxfp8", "nvfp4"], default="none")
     parser.add_argument("--quant-group-size", type=int, default=128)
     parser.add_argument("--quant-backend", choices=["reference", "dandan"], default="reference")
+    parser.add_argument("--sampling-backend", choices=["torch", "cuda"], default="torch")
+    parser.add_argument("--speculative", choices=["none", "prompt_lookup"], default="none")
+    parser.add_argument("--max-draft-tokens", type=int, default=4)
+    parser.add_argument("--adaptive-draft", action="store_true")
     args = parser.parse_args()
     dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[args.dtype]
     runner = NativeQwen3Runner.from_pretrained(
@@ -43,6 +47,7 @@ def main():
         enable_thinking=args.thinking, local_files_only=args.local_files_only,
         fuse_projections=args.fuse_projections,
         quant_backend=args.quant_backend,
+        sampling_backend=args.sampling_backend,
         quantization=None if args.quantization == "none" else QuantConfig(
             args.quantization, activation_dtype=args.dtype, group_size=args.quant_group_size),
     )
@@ -64,13 +69,21 @@ def main():
             if not user_text.strip():
                 continue
             messages.append({"role": "user", "content": user_text})
-            result = runner.chat(messages, args.max_new_tokens)
+            if args.speculative == "prompt_lookup":
+                result = runner.generate_speculative(messages=messages, max_new_tokens=args.max_new_tokens,
+                    max_draft_tokens=args.max_draft_tokens, adaptive_draft=args.adaptive_draft).text
+            else:
+                result = runner.chat(messages, args.max_new_tokens)
             messages.append({"role": "assistant", "content": result})
             print(f"assistant> {result}")
     else:
         if args.prompt is None:
             parser.error("--prompt is required unless --chat is used")
-        result = runner.generate_incremental(args.prompt, args.max_new_tokens)
+        if args.speculative == "prompt_lookup":
+            result = runner.generate_speculative(args.prompt, args.max_new_tokens,
+                max_draft_tokens=args.max_draft_tokens, adaptive_draft=args.adaptive_draft)
+        else:
+            result = runner.generate_incremental(args.prompt, args.max_new_tokens)
         payload = asdict(result)
         payload["quantization"] = runner.model.quantization_report
         payload["backends"] = runner.model.backend_report()

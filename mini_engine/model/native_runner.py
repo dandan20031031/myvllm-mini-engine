@@ -11,7 +11,8 @@ from .qwen3 import IncrementalGenerationResult
 
 
 class NativeQwen3Runner:
-    def __init__(self, model, tokenizer, *, num_blocks=256, block_size=16, enable_thinking=False, eos_token_ids=None):
+    def __init__(self, model, tokenizer, *, num_blocks=256, block_size=16, enable_thinking=False, eos_token_ids=None,
+                 sampling_backend="torch"):
         self.model = model.eval()
         self.tokenizer = tokenizer
         self.enable_thinking = enable_thinking
@@ -20,13 +21,23 @@ class NativeQwen3Runner:
         self.eos_token_ids = eos_token_ids
         self._busy = False
         self.last_backend = model.decode_backend
+        if sampling_backend not in {"torch", "cuda"}:
+            raise ValueError("sampling backend must be torch or cuda")
+        self.sampling_backend = sampling_backend
 
     @classmethod
     def from_pretrained(cls, path, *, device="cuda", dtype=torch.bfloat16, prefill_backend="auto", decode_backend="torch", elementwise_backend="torch", data_backend="torch", linear_backend="torch",
                         num_blocks=256, block_size=16, enable_thinking=False, local_files_only=False,
-                        quantization=None, fuse_projections=False, quant_backend="reference"):
+                        quantization=None, fuse_projections=False, quant_backend="reference", sampling_backend="torch"):
         from ..runtime import configure_local_cache
         configure_local_cache()
+        if sampling_backend not in {"torch", "cuda"}:
+            raise ValueError("sampling backend must be torch or cuda")
+        if sampling_backend == "cuda":
+            if not str(device).startswith("cuda"):
+                raise ValueError("CUDA sampling requires CUDA device")
+            from ..kernels.cuda_extension import load_cuda_extension
+            load_cuda_extension()
         from ..kernels.dandan_backend import DANDAN_LINEAR_BACKENDS, LINEAR_BACKENDS, validate_dandan_runtime
         if linear_backend not in LINEAR_BACKENDS:
             raise ValueError("unknown linear backend")
@@ -89,7 +100,7 @@ class NativeQwen3Runner:
         if quantization is not None:
             native.quantize(quantization, backend=quant_backend)
         return cls(native, tokenizer, num_blocks=num_blocks, block_size=block_size,
-                   enable_thinking=enable_thinking, eos_token_ids=stop_ids)
+                   enable_thinking=enable_thinking, eos_token_ids=stop_ids, sampling_backend=sampling_backend)
 
     def _sync(self):
         if self.cache.device.type == "cuda":
@@ -130,7 +141,7 @@ class NativeQwen3Runner:
             position = ids.numel()
             reason = "length"
             for index in range(max_new_tokens):
-                token = sample_next_token(logits, temperature, top_k, top_p)
+                token = sample_next_token(logits, temperature, top_k, top_p, backend=self.sampling_backend)
                 token_id = int(token.item())
                 self._sync()
                 emitted = time.perf_counter()
@@ -165,16 +176,23 @@ class NativeQwen3Runner:
         result = self.generate_incremental(None, max_new_tokens, messages=list(messages), **kwargs)
         return result.text
 
+    def generate_speculative(self, prompt=None, max_new_tokens=128, **kwargs):
+        """Greedy prompt-lookup drafting with target verification and KV rollback."""
+        from ..speculative import generate_speculative
+        return generate_speculative(self, prompt, max_new_tokens, **kwargs)
+
     def create_batch_runtime(self, *, max_prefix_entries=128, graph_manager=None,
                              graph_padding_block_ids=None, graph_padding_blocks=0,
                              use_cuda_graph=False, graph_batch_sizes=(1, 2, 4, 8),
-                             graph_block_buckets=(16, 32, 64)):
+                             graph_block_buckets=(16, 32, 64), prefill_chunk_size=None,
+                             max_num_batched_tokens=4096, enable_prefix_cache=True):
         """Create the scheduler-driven runtime over this runner's model/cache."""
         from ..cache import PrefixCache
         from ..engine import NativeBatchRuntime
         from ..engine.scheduler import Scheduler
 
-        scheduler = Scheduler(self.block_manager)
+        scheduler = Scheduler(self.block_manager, max_num_batched_tokens=max_num_batched_tokens,
+                              prefill_chunk_size=prefill_chunk_size)
         prefix = PrefixCache(self.block_manager, max_entries=max_prefix_entries)
         if use_cuda_graph and graph_manager is None:
             from ..engine import DecodeGraphManager
@@ -195,6 +213,8 @@ class NativeQwen3Runner:
             self.model, scheduler, self.cache,
             prefix_cache=prefix, eos_token_ids=self.eos_token_ids,
             graph_manager=graph_manager,
+            prefill_chunk_size=prefill_chunk_size, enable_prefix_cache=enable_prefix_cache,
+            sampling_backend=self.sampling_backend,
         )
         runtime.graph_padding_block_ids = graph_padding_block_ids
         return runtime
