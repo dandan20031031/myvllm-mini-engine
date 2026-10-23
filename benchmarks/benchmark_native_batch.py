@@ -31,19 +31,6 @@ from mini_engine.model import NativeQwen3Runner
 from mini_engine.runtime import configure_local_cache
 
 
-class DisabledPrefixCache:
-    """Make the timed workload independent of shared prompt/cache history."""
-
-    def lookup(self, tokens):
-        return None
-
-    def insert(self, *args, **kwargs):
-        return None
-
-    def clear(self):
-        pass
-
-
 def dandan_metadata():
     spec = importlib.util.find_spec("dandan_ops")
     if spec is None:
@@ -148,8 +135,7 @@ def run_mode(args, use_cuda_graph: bool):
         graph_batch_sizes=(1, 2, 4, 8, 16),
         graph_block_buckets=(8, 16, 32, 64),
     )
-    if args.prefix_cache == "disabled":
-        runtime.prefix_cache = DisabledPrefixCache()
+    runtime.enable_prefix_cache = args.prefix_cache == "enabled"
     if args.ignore_eos:
         runtime.eos_token_ids.clear()
     prompt_ids = encode_prompts(runner, args.prompts)

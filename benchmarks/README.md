@@ -1,5 +1,17 @@
 # Benchmark 目录
 
+当前入口：
+
+| 脚本 | 范围 |
+|---|---|
+| `benchmark_paged_sweep.py` | 原CUDA与D128向量化kernel配对Graph计时，5种block size；非服务延迟 |
+| `benchmark_native_batch.py` | 真实scheduler eager/Graph对照，实际token统计和后端指纹 |
+| `benchmark_speculative.py` | 普通greedy/投机输出一致性、接受率和单请求耗时 |
+| `benchmark_http.py` | 标准库HTTP/SSE负载，可对兼容服务采集usage、TTFT/P95与吞吐；`--compare`拒绝不匹配条件 |
+| `validate_system_extensions.py` | 完整模型chunk/prefix/Graph与可选真实HTTP验证，仅正确性不测速 |
+
+客户端usage缺失时，不以SSE chunk数代替token数。跨引擎数据需附相同模型/精度/硬件/工作负载manifest；本仓库尚无vLLM/SGLang同条件实测结果。
+
 `mini_engine.benchmarks.runner` 提供统一计时和 JSON 输出。它不绑定某个模型后端，因此可以给 Transformers、vLLM 和 MiniQwenEngine 各写一个 adapter，再使用相同的 prompts、warmup、重复次数和输出长度。
 
 示例：

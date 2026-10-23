@@ -1,229 +1,73 @@
 # MiniQwenEngine 项目总览
 
-本文把 `reports/STAGE_*.md` 中的阶段结果合并成一份当前状态说明，方便直接了解项目已经实现的能力、实际验证结果和下一步工作。阶段报告仍保留，用于查看具体代码调用链、数据布局和实验细节。
+更新：2026-10-24。面向实习展示的 Windows 11 单卡 Qwen3-0.6B 推理引擎；Transformer权重加载与tokenizer使用HuggingFace，native forward、KV管理、调度与CUDA算子由项目实现。
 
-## 项目定位
+## 已实现能力
 
-MiniQwenEngine 是一个面向 Qwen3-0.6B 的 Windows 11 单 GPU 推理引擎实验项目。当前约束是：
+| 模块 | 当前实现 |
+|---|---|
+| 原生模型 | Qwen3 embedding、Q/K RMSNorm、RoPE、GQA、SwiGLU；完整prefill、单token/batch decode、多token suffix |
+| KV管理 | 分页tensor pool、跨页写入、引用计数、LRU、逻辑长度回退与物理尾页释放 |
+| Prefix | 完整block共享；命中跳过计算、边界logits复用，避免覆盖共享页 |
+| 调度 | continuous batching，decode优先、有token预算的chunked prefill，保守最大KV预留，取消与异常回收 |
+| CUDA | FP16/BF16 PagedAttention（GQA/split-KV/D128向量化）、Norm/Residual/SwiGLU、Embedding/RoPE/KV scatter、causal suffix prefill、可选greedy argmax |
+| Graph与融合 | 真实batch decode Graph bucket、固定buffer、独立padding页；QKV与Gate/Up融合 |
+| 精度 | FP32/FP16/BF16；INT8/INT4/FP8 weight-only reference；可选dandan FP16 GEMM/Flash和W4A16 CUDA计算 |
+| 投机 | 无额外模型的greedy prompt lookup、并行验证、接受/拒绝、KV回退、接受率自适应draft预算 |
+| 接口 | CLI、多轮Chat、Windows HTTP chat completions子集/SSE；单GPU worker调度，有界输入/输出队列和断线取消 |
+| 实验 | kernel配对sweep、真实batch eager/Graph、投机对拍、完整模型系统验收、兼容服务HTTP负载与比较条件检查 |
 
-- Windows 11 原生运行，PowerShell + MSVC + nvcc；
-- 不依赖 Linux、WSL 或 Triton；
-- Transformers 只负责模型权重、配置和 tokenizer 加载，以及正确性参考；
-- native forward、KV Cache、调度和 CUDA backend 由项目自己实现；
-- 先聚焦 Qwen3-0.6B 和单 GPU，再扩展模型、量化和服务能力。
-
-当前验证机器：RTX 5080（SM 12.0）、PyTorch 2.9.1+cu128、Windows CUDA 工具链。完整 Qwen3-0.6B 权重放在本地模型目录，不进入公开仓库。
-
-## 当前架构
-
-```text
-CLI / benchmark
-        |
-NativeQwen3Runner / NativeBatchRuntime
-        |
-Scheduler -> GenerationRequest -> BlockManager
-        |
-NativeQwen3 -> KVCachePool -> CUDA kernels / PyTorch reference
-        |
-PagedAttention / CUDA Graph / Projection Fusion
-```
-
-主要代码位置：
-
-| 模块 | 代码位置 | 作用 |
-|---|---|---|
-| 请求和调度 | `mini_engine/engine/` | 请求状态、调度、batch decode、Graph bucket |
-| 物理 KV Cache | `mini_engine/cache/` | block 分配、tensor pool、prefix cache、引用计数 |
-| native Qwen3 | `mini_engine/model/` | Qwen3 layer、prefill、增量 decode、模型 runner |
-| CUDA dispatch | `mini_engine/kernels/*.py` | torch/CUDA backend 选择和 Python 参数边界 |
-| CUDA 源码 | `mini_engine/kernels/csrc/` | PagedAttention、elementwise、数据移动、prefill |
-| 量化 reference | `mini_engine/quantization/` | INT8、INT4、FP8 打包和反量化参考路径 |
-| benchmark | `benchmarks/` | 单算子、单请求、batch eager/Graph 计时 |
-
-## 已实现功能
-
-### 1. 推理引擎基础
-
-- `waiting/running/finished/aborted` 请求生命周期；
-- 固定大小的 `BlockManager`，逻辑 token 到物理 KV block 的映射；
-- `KVCachePool`，布局为 `[layer, physical_block, token, kv_head, head_dim]`；
-- 跨 block KV 写入、清理、释放和容量检查；
-- scheduler 驱动的连续批处理框架；
-- 单请求 `NativeQwen3Runner` 和 scheduler 驱动的 `NativeBatchRuntime`；
-- EOS、最大输出长度、异常路径和 block 回收。
-
-### 2. Qwen3-0.6B native forward
-
-- Qwen3 embedding、Q/K RMSNorm、RoPE、GQA、SwiGLU；
-- Q/K/V/O、Gate/Up/Down、LM head 的 native projection 路径；
-- prefill + 单 token decode；
-- 自有 Paged KV Cache，不使用 Transformers `past_key_values` 执行 native forward；
-- 与小型随机 Qwen3 和完整 Qwen3-0.6B 的 reference 对齐；
-- Windows 本地单轮推理和多轮 CLI Chat。
-
-### 3. 已接入的 CUDA 算子
-
-- CUDA PagedAttention：FP16/BF16、GQA、非连续物理 page、长上下文 partition；
-- CUDA RMSNorm；
-- CUDA Residual + RMSNorm；
-- CUDA Residual Add；
-- CUDA fused SiLU×Up；
-- CUDA Embedding gather；
-- CUDA RoPE；
-- CUDA 单请求和 batch KV Cache 写入；
-- CUDA causal prefill correctness-first kernel；
-- 显式 CUDA Linear，底层调用 PyTorch cuBLAS/cuBLASLt。
-
-PyTorch fallback 仍保留，便于对拍和在不具备 CUDA 工具链的环境中运行 reference 测试。
-
-### 4. Batch、Prefix Cache 和 CUDA Graph
-
-- batch decode 一次执行多个请求的 input、position、block table 和模型 forward；
-- Prefix Cache 共享完整物理 block；
-- block 引用计数和 LRU 淘汰保护；
-- prefill 目前仍逐请求执行；
-- CUDA Graph shape bucket，固定 batch size、block table 宽度和 GPU buffer 地址；
-- inactive slot 使用独立 scratch KV pages；
-- Graph capture/replay 已接入真实 `NativeBatchRuntime.decode_step`；
-- Graph capture 路径跳过会触发 host 同步的 metadata reduction 和 kernel launch error query。
-
-### 5. Projection Fusion
-
-阶段 18 已加入可选 projection fusion：
-
-- Q/K/V 权重拼接为一次 QKV 矩阵乘，再切分成 Q、K、V；
-- Gate/Up 权重拼接为一次矩阵乘，再切分给 SiLU×Up；
-- 默认路径不改变；
-- 量化 reference 暂不与 projection fusion 混用；
-- CLI 和 benchmark 使用 `--fuse-projections` 开启。
-
-这属于 projection-level fusion，矩阵乘底层仍由 PyTorch/cuBLAS/cuBLASLt 执行，不等于已经实现专用 Tensor Core GEMM。
-
-### 6. 多精度和量化 reference
-
-- FP32、FP16、BF16 浮点路径；
-- INT8 weight-only reference；
-- packed INT4 reference；
-- FP8 E4M3/E5M2 weight-only reference；
-- NVIDIA 精度能力探测和能力矩阵；
-- 明确区分权重存储格式、激活格式、累加格式、KV 格式和真实计算后端。
-
-当前 INT4/FP8 reference 会反量化后执行普通 Linear，不能直接称为量化加速。NVFP4、MXFP8、FP8/INT8 KV Cache 尚未完成。
-
-阶段22新增可选 dandan W4A16：保留原对称INT4 group64/128结果，无损转换到库的存储格式，使用CUDA GEMV/Tensor Core。支持先融合投影再量化；默认仍是reference。实际速度与模型质量另行评估。
-
-## 已完成的验证
-
-2026-10-23 阶段22后，全量回归为：
+## 代码调用链
 
 ```text
-201 passed, 2 warnings
+CLI / HTTP线程 / benchmark
+        |
+NativeQwen3Runner / 服务单GPU worker
+        |
+NativeBatchRuntime -> Scheduler -> GenerationRequest
+        |                  |
+  PrefixCache          BlockManager
+        |                  |
+NativeQwen3 ---------- KVCachePool
+        |
+CUDA kernels / cuBLAS / optional dandan_ops
 ```
 
-warning 是当前 Windows 工具链与 PyTorch CUDA runtime 的版本提示，以及 setuptools 的 MSVC 环境提示。
+- `mini_engine/engine/runtime.py`：decode优先，再执行未缓存prompt块；模型结果交给请求采样与状态更新。
+- `mini_engine/cache/`：block的物理所有权、完整prefix边界与KV tensor存储分离。
+- `mini_engine/model/native_qwen3.py`：单token直接paged decode；多token suffix按绝对位置causal验证。
+- `mini_engine/speculative.py`：将pending token与草稿一次送入目标，提交连续接受前缀，拒绝部分截断KV逻辑长度并归还尾页。
+- `mini_engine/server.py`：HTTP线程仅验证/收发；tokenizer、runtime、KV变更全部由单worker处理。
+- `mini_engine/kernels/cuda_extension.py`：内容hash隔离Windows DLL构建；旧会话可继续加载旧DLL，新版本编译到不同路径。launch错误检查已恢复，Graph中只跳过会同步到CPU的tensor metadata检查。
 
-完整 Qwen3-0.6B 已在 RTX 5080 BF16 全 CUDA backend 下完成文本生成验收。当前可本地运行 CLI Chat，也可以直接运行 batch benchmark。
+各阶段逐文件解读保存在 `reports/STAGE_23_*.md` 至 `reports/STAGE_27_*.md`，历史阶段报告保留当时的实现状态。
 
-## Benchmark 结果
+## 验证与性能证据
 
-### PagedAttention 单算子
+设备：RTX5080 SM120，PyTorch2.9.1+cu128。项目CUDA使用Toolkit13.3；独立算子库此前用12.8构建。两者均须通过目标机回归，不能因为版本提示而忽略运行测试。
 
-配置：RTX 5080、FP16、Qwen3-0.6B attention shape、GQA、`block_size=256`。
+- 最终全量325 passed、2 warnings；CUDA、Graph及本机HTTP loopback实际执行。
+- 完整Qwen3 BF16：64-token冷/热prefix的计算64→0，5-token后缀仅算5；共享页保持不变，完整/分块输出一致。
+- batch2/4 eager/Graph输出一致，capture真实执行；真实并发HTTP/SSE正常返回usage/DONE，关闭后KV引用全部为0。
+- FP16 dandan GEMM/Flash与W4A16也通过完整模型chunk/prefix/Graph验收；这比较相同精度的执行路径，不代表INT4与BF16质量相同。
+- 新D128向量化PagedAttention的15组FP16配对测量观察到1.74–1.80x，基线为项目原CUDA kernel，计时为Graph内单算子均摊；非服务性能。
+- BF16重复句子投机实测：32输出token，target调用32→16，537.39→300.87ms（观察1.79x）；普通KV问答调用仍32次，几乎无收益。短序列输出一致，不代表所有浮点配置batch invariant。
+- 历史3请求BF16 batch：eager189.3、Graph473.9、fusion+Graph519.2 tokens/s。只作历史参考，不能与本轮不同精度/负载/计时直接拼比。
 
-| batch/context | 当前 CUDA kernel | 项目 PyTorch fallback | 相对 fallback |
-|---|---:|---:|---:|
-| 1 / 128 | 0.0474 ms | 0.3779 ms | 7.97x |
-| 8 / 512 | 0.0951 ms | 2.6245 ms | 27.60x |
-| 32 / 2048 | 0.6999 ms | 10.2962 ms | 14.71x |
+原始结果在 `benchmarks/results/`，不提交模型或机器相关大文件；报告保存紧凑摘要。GPU未严格独占的数据不作为工业引擎排名证据。
 
-同配置下，MiniVLLM Triton 分块 kernel 约为 `0.019 / 0.017 / 0.377 ms`，因此当前 PagedAttention 仍慢于 MiniVLLM，差距约为 `2.0x～5.6x`。当前主要短板是 vectorized KV load、batch=1 并行度和 flash-decoding。
+## 仍需完成
 
-### 单请求 Qwen3-0.6B
+1. **真正ragged batched prefill、直接paged多query验证**：当前chunk仍逐请求执行，suffix需要gather KV。
+2. **FP8/INT8 KV与FP8 GEMM**：定义scale、直接分页读取和模型误差；已有W4A16不能代表这些格式完成。
+3. **NVFP4/MXFP8**：尚无项目可用计算后端，保留reserved，不能用INT4冒充FP4。
+4. **更完整投机**：小draft、随机接受/校正分布、batch/Graph调度、EAGLE-3/DFlash训练型draft；现有接受率策略不是DeepInfer置信度实现。
+5. **服务生产能力**：目前greedy聊天子集，无tools/多模态/安全网关；服务执行错误可中止整个active batch。异步调度、preemption、随机CUDA采样尚待完成。
+6. **行业公平跑分与质量集**：HTTP工具已经可用，尚无本项目与vLLM/SGLang同条件实测；DeepInfer目标模型不同，不纳入Qwen3速度排名。
+7. **工具验证**：新kernel尚未做compute-sanitizer memcheck/racecheck；数值/Graph测试不能替代。
 
-已有完整模型基线：
+## 实习展示方式
 
-```text
-GPU: RTX 5080
-dtype: BF16
-TTFT: 约 22～24 ms
-TPOT: 约 20～21 ms/token
-```
+展示完整调用链、独立CUDA与参考对拍、缓存跳过计数、投机拒绝回退、真实HTTP请求，以及可重复性能实验。简历可以写已经实现并验收的工程能力与具体实验配置；不要写“全面超过vLLM”、将全部研究计划写成完成，或把论文速度当作项目速度。
 
-阶段 18 的单请求 projection fusion 方向性测试，在相同脚本下得到约 `3.7%～8.6%` 的 TPOT 改善；这个结果受 Windows/GPU 调度抖动影响，需要以 batch Graph benchmark 为主要判断依据。
-
-### Batch eager / CUDA Graph
-
-配置：RTX 5080、Qwen3-0.6B、BF16、3 条请求、`block_size=16`、32 token 输出预算、warmup=1、repetitions=3。计时包含逐请求 prefill 和 scheduler 生命周期。
-
-| 模式 | median total | median aggregate TPS |
-|---|---:|---:|
-| eager | 438.38 ms | 189.33 tokens/s |
-| CUDA Graph | 175.15 ms | 473.87 tokens/s |
-| Projection Fusion + CUDA Graph | 159.88 ms | 519.15 tokens/s |
-
-CUDA Graph 相对 eager 约 `2.50x`。这是当前项目 runtime 的真实 batch 基线，不是只统计 decode kernel，也不是和 MiniVLLM/vLLM 完全同口径的最终对比。
-
-## 当前短板
-
-1. **Prefill 仍逐请求执行**：还没有 chunked prefill 和真正的 batched prefill。
-2. **Prefix Cache 还没有完全跳过 prompt 计算**：目前已经共享物理 block 和生命周期，但 next logits 复用路径仍需完善。
-3. **PagedAttention 仍有优化空间**：需要 vectorized load、block size sweep、split-KV/flash-decoding。
-4. **Linear 仍主要依赖 cuBLAS**：projection fusion 减少了矩阵乘次数，但还不是专用高性能 GEMM。
-5. **量化性能/质量仍需验收**：阶段22已接入可选 W4A16 CUDA kernel，FP8仍为reference。W4A16省权重存储不代表当前端到端更快。
-6. **Sampling 仍是 PyTorch reference**：尚未实现 CUDA greedy、top-k、top-p 融合采样。
-7. **服务层尚未完成**：没有 Windows HTTP/OpenAI/SSE 服务。
-8. **Graph benchmark 还需扩展**：当前已有真实 batch 路径，但还需要 batch=1/2/4/8、FP16、P50/P95、不同 block size 和 prefill/decode 分离统计。
-9. **行业级公平对比尚未完成**：还需要统一模型、精度、prompt、输出长度、batch、采样和计时范围，对比 MiniVLLM、vLLM、SGLang 或 TensorRT-LLM。
-
-## 后续路线
-
-### 阶段22：dandan_ops 后端接入
-
-`dandan_ops` 是独立开发的高性能算子库，当前已经包含：
-
-- FP16 HGEMM；
-- SM120 TMA 路径；
-- `backend="cuda"/"tma"/"auto"` 选择；
-- W4A16 `QuantizedLinear`；
-- CUDA Graph benchmark 和 Compute Sanitizer 验证记录。
-
-本轮已经实现：
-
-1. 可选安装和契约v2检查，无本机路径依赖；
-2. `DandanLinear` 保持 `[N,K]` 权重，`dandan`调用库auto、`dandan_cuda`强制HGEMM，融合投影保留所选后端；
-3. 对称INT4 group64/128无损转换为unsigned int32 packing、zero8、存储group64，并接入W4A16 CUDA GEMV/Tensor Core；支持先融合再量化；
-4. `--prefill-backend dandan` 直接使用FP16 D128 GQA Flash，不展开KV heads；decode继续使用引擎分页kernel；
-5. 库缺失、dtype/device/能力不支持提前报错，记录库源码、二进制和profile指纹；
-6. 完整0.6B短序列数值对拍、真实Graph logits/KV回归；修复padding slots共用写入页；
-7. benchmark支持固定实际token数、禁用Prefix、分开记录量化/backend，增加独立数值验收脚本。
-
-当前FP16/cuBLAS基线保留默认。完整模型验证不等于长序列质量评估；本轮性能运行期间外部库改变且GPU有其他负载，数据仅作运行检查，不用于宣称加速。下一步先在固定库版本和独占GPU条件下补公平性能验收，再按实测瓶颈调整。
-
-### 下一优先级：PagedAttention
-
-- vectorized KV load；
-- block size `16/32/64/128/256` sweep；
-- batch=1 split-KV；
-- flash-decoding partition/merge；
-- 重新做 MiniVLLM 同口径算子对比。
-
-### 第三优先级：系统能力
-
-- chunked/batched prefill；
-- Prefix Cache 真正跳过已缓存 prompt；
-- CUDA sampling；
-- 更完整的 request cancellation、异步资源释放和服务 API；
-- batch=1/2/4/8 的 Graph benchmark 和 P50/P95。
-
-### 第四优先级：精度和高级解码
-
-- W4A16形状路由及质量评估、FP8 Tensor Core GEMM；
-- FP8/INT8 KV Cache；
-- NVFP4/MXFP8 能力验证和 Windows backend；
-- 投机解码：greedy 多 token 验证、KV 回退、prompt lookup、小 draft model、随机采样校正。
-
-## 当前结论
-
-项目已经从基础骨架发展为可以在 Windows RTX 5080 上运行完整 Qwen3-0.6B 的 native 推理引擎：有自有 KV Cache、CUDA PagedAttention、CUDA elementwise、batch decode、Prefix Cache、真实 CUDA Graph 和 projection fusion。
-
-当前最有竞争力的方向是把 `dandan_ops` 接入 Linear/GEMM/量化主路径，再结合 PagedAttention 和 prefill 优化。现阶段不应宣称已经超过 MiniVLLM 或 vLLM；但系统架构、CUDA 可替换性和后续自研算子空间已经具备继续对比和开源迭代的基础。
+学术与行业来源、可行性和验收门槛统一保存在 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)。启动及benchmark命令见 [README.md](README.md)。

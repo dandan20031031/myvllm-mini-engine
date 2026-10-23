@@ -33,15 +33,17 @@ DeepInfer当前开源目标模型为DeepSeek-V4.1-Flash，官方说明是offline
 
 | 阶段 | 交付与验收 | 状态 |
 |---|---|---|
-| 23 | Prefix命中实际跳过 + 多token suffix + 有token预算的chunked prefill；逐tokenlogits/共享页不改写/取消回收/内存压力/长prompt推进测试 | 开发中 |
-| 24 | Prompt lookup greedy投机、KV回退、EOS与输出预算、固定/自适应draft；与普通decode对拍，记录接受率和真实端到端耗时 | 开发中 |
-| 25（承接14） | Windows HTTP chat completions子集与SSE；单GPU worker continuous batching、断线取消、有界队列、真实HTTP测试 | 开发中 |
-| 26（承接20） | PagedAttention向量化与可选baseline、block16/32/64/128/256实验；恢复CUDA launch错误检查并验证Graph；CUDA greedy采样 | 开发中 |
-| 27（承接15/19/22） | 固定后端指纹、同口径benchmark/质量与消融实验、可导出的行业对照数据；真实模型集成验收与实习展示报告 | 待执行 |
+| 23 | Prefix命中实际跳过、多token suffix、decode优先chunk预算、共享页保护和内存压力处理 | 已实现并通过真实0.6B验收；64-token完整命中实际计算为0 |
+| 24 | Prompt lookup greedy投机、KV回退、EOS/预算、固定/接受率自适应draft | 已实现；两条真实prompt逐token对拍通过。重复文本观察1.79x，普通问答无明显收益 |
+| 25（承接14） | Windows HTTP chat completions子集/SSE、单GPU worker continuous batching、断线取消、有界队列 | 已实现；真实0.6B并发JSON/SSE通过，退出后KV引用为0 |
+| 26（承接20） | D128 PagedAttention向量化、保留baseline、5种block size；恢复launch检查、CUDA greedy、构建hash隔离 | 已实现；FP16/BF16/Graph对拍通过，15组配对算子实验观察1.74–1.80x |
+| 27（承接15/19/22） | HTTP公平计量/条件校验、模型集成验收和可提交实验摘要 | 工具与本机验收已完成；外部vLLM/SGLang实测、完整质量集和独占GPU性能采集仍待执行 |
 
 本轮完成可独立验收的23–27。旧计划的FP8 GEMM、INT8/FP8 KV、NVFP4/MXFP8、训练型draft仍是后续研究工作，不因本轮结束自动标记完成。它们分别需要独立kernel、模型质量验收以及Windows硬件/工具链证据；保留在阶段16/17/21中继续推进，不提供伪实现。已有W4A16不重复开发。
 
 ### 验收与简历表达
+
+2026-10-24验收：325 tests通过（CUDA/Graph/HTTP实际运行），完整0.6B的BF16、FP16 dandan与W4A16三组chunk/prefix/batch2/4 Graph全部通过；BF16并发HTTP/SSE完成后KV引用为0。详见`reports/STAGE_27_REPRODUCIBLE_BENCHMARK.md`和紧凑JSON摘要。
 
 - 核心证据：相同权重下输出/数值对拍，prefix实际执行token计数，speculative接受/拒绝回退，混合长短请求无饥饿，SSE取消后page引用归还。
 - 性能矩阵：batch1/2/4/8，短/长prompt，共享/不共享前缀，greedy固定输出，BF16/cuBLAS及FP16/dandan/W4A16分别报告；不同精度不能混算优化收益。
@@ -56,7 +58,7 @@ DeepInfer当前开源目标模型为DeepSeek-V4.1-Flash，官方说明是offline
 - Windows 11 原生，PowerShell + MSVC + nvcc；不依赖 Linux、WSL、Triton。
 - 项目源码、.venv、模型、编译输出、临时文件及可配置缓存均放在当前 D 盘项目目录。
 - Transformers 负责加载和正确性参考；native forward 和缓存由项目实现。
-- 第一版不做多 GPU、多模型通用适配；投机解码留待基础推理稳定后评估。
+- 不做多GPU、多模型通用适配；greedy prompt-lookup投机已实现，训练型draft继续独立评估。
 - 每阶段完成必要测试、代码解读报告、README/计划更新和本地 Git commit。
 
 ## 2. 架构与数据流
@@ -73,7 +75,7 @@ NativeQwen3Runner -- NativeQwen3 -- QuantBackend / ReferenceQuantLinear
     KVCachePool          CUDA kernels / PyTorch reference
 ~~~
 
-单请求 NativeQwen3Runner 持有 BlockManager 和 KVCachePool；create_batch_runtime 将它们接到 Scheduler、NativeBatchRuntime 和 DecodeGraphManager，实现真实 batch decode。Prefill 仍逐请求执行。
+单请求NativeQwen3Runner持有BlockManager和KVCachePool；create_batch_runtime接到Scheduler、NativeBatchRuntime和DecodeGraphManager。Prefill按请求分块并优先让decode推进；完整prefix可直接复用logits。HTTP线程通过单GPU worker提交请求。
 
 KV 布局是 [layer, physical_block, token_in_block, kv_head, head_dim]。KV 精度当前与浮点模型一致；低精度权重不代表低精度 KV。
 
@@ -135,17 +137,17 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 | 06 | INT4/FP8 reference、native Linear、能力矩阵 | 完成 |
 | 07 | 所有 RMSNorm、Residual、SwiGLU CUDA，边界/模型/Graph 测试及单算子实测 | 完成 |
 | 08 | Embedding/RoPE/KV 写入 CUDA，复用 block table、减少每层同步 | 完成；正确性已验收 |
-| 09+10 | Scheduler 接通 native model execution、batch decode、Prefix/Block Cache 生命周期 | 完成；prefill 跳过仍待做 |
+| 09+10 | Scheduler 接通 native model execution、batch decode、Prefix/Block Cache 生命周期 | 完成；prefill跳过在23完成 |
 | 11 | CUDA Graph decode shape bucket、固定 metadata、runtime replay | 完成；真实 batch benchmark 已通过，持续优化 capture 覆盖 |
 | 12 | Windows CUDA prefill correctness-first backend | 完成；尚不等同 FlashAttention 性能 |
 | 13 | 显式 CUDA Linear/cuBLAS 边界、完整 Qwen3 验收和本地 Chat | 部分完成；INT4/FP8/NVFP4/MXFP8 高性能 GEMM 待做 |
-| 14 | Windows HTTP/OpenAI/SSE 服务 | 后置；尚未实现 |
+| 14 | Windows HTTP/OpenAI/SSE 服务 | greedy聊天子集在25完成 |
 | 15 | Transformers、具体 MiniVLLM、vLLM/SGLang/TensorRT-LLM 正式对比 | 待实现 |
 | 16 | 精度感知 KV、FP8/INT8 KV、NVFP4/MXFP8 | 待实现 |
-| 17 | 投机解码 | 已列入计划；尚未实现 |
+| 17 | 投机解码 | greedy prompt lookup/回退/接受率预算在24完成；小draft、随机校正和batch投机待做 |
 | 18 | Projection Fusion：QKV、Gate/Up 合并矩阵乘，减少 decode GEMM/launch | 完成首轮；单请求和 batch Graph 已验证，继续优化 |
 | 19 | 真实 batch CUDA Graph：eager/Graph 公平 TPOT、TPS、P50/P95 | 完成首轮；3 请求/32 token Graph benchmark 已通过，完整分位数和多 batch sweep 待扩展 |
-| 20 | PagedAttention kernel：vectorized load、flash-decoding、block size sweep | 待实现 |
+| 20 | PagedAttention kernel：vectorized load、flash-decoding、block size sweep | D128向量化与5种block sweep在26完成；更广形状/partition调优待做 |
 | 21 | 高性能量化：INT4/FP8 Tensor Core GEMM、FP8/INT8 KV、NVFP4/MXFP8 探索 | INT4 CUDA接入已在22完成；其余待实现，性能/质量继续评估 |
 | 22 | 可选 dandan_ops：FP16 Linear、W4A16 bridge、GQA Flash prefill、融合/Graph验证和同口径 benchmark | 功能/数值验收完成，201 tests通过；公平性能重测待空闲GPU和固定库版本，见 reports/STAGE_22_DANDAN_BACKEND.md |
 
@@ -203,7 +205,7 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 
 2026-10-23 调整：18/19 首轮完成后，先执行阶段22接入现成的 dandan_ops，不要求引擎等待算子库最终优化。三种正式路径为 BF16 CUDA/cuBLAS 基线、FP16 dandan 可选后端、INT4+FP16 W4A16。保持默认后端不变；显式后端缺失能力/不兼容配置要提前报错。记录库源码、二进制及路由 profile 指纹；每次升级重新验证 logits/KV/Graph 和端到端性能。
 
-阶段22之后回到阶段20：PagedAttention profiling、向量化 KV load、block size sweep；然后补 Prefix 命中跳过计算、chunked/batched prefill、采样。阶段21剩余FP8 GEMM/低精度KV及阶段17投机解码继续后置。以下18/19顺序作为已完成工作的背景。
+2026-10-24更新：阶段23–26已补实际Prefix跳过、chunked prefill、greedy投机、HTTP/SSE、D128向量化和CUDA greedy；27提供真实模型验收和外部HTTP比较工具。接下来做直接paged多query验证、ragged batched prefill、低精度KV/FP8 GEMM与受控行业采集。下面18/19顺序保留为历史背景。
 
 MiniVLLM 的 RTX 5080 profiler 显示，eager decode 的主要问题是 CPU kernel launch 空洞，GPU 时间主要集中在小 batch GEMM；其 PagedAttention 只占较小比例。因此优化顺序固定为：
 
