@@ -4,6 +4,7 @@
 #include <vector>
 
 at::Tensor causal_prefill_cuda(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v);
+at::Tensor causal_prefill_suffix_cuda(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, int64_t query_start);
 
 at::Tensor embedding_lookup_cuda(const at::Tensor& weight, const at::Tensor& ids, bool validate);
 std::vector<at::Tensor> apply_rope_cuda(const at::Tensor& q, const at::Tensor& k,
@@ -17,7 +18,9 @@ void write_kv_cache_batch_cuda(const at::Tensor& key_cache, const at::Tensor& va
 
 at::Tensor paged_attention_cuda(const at::Tensor& query, const at::Tensor& key,
     const at::Tensor& value, const at::Tensor& tables, const at::Tensor& lengths,
-    int64_t block_size);
+    int64_t block_size, bool vectorized);
+
+at::Tensor greedy_argmax_cuda(const at::Tensor& logits);
 
 at::Tensor rms_norm_cuda(const at::Tensor& x, const at::Tensor& weight, double eps);
 std::vector<at::Tensor> residual_rms_norm_cuda(const at::Tensor& x, const at::Tensor& residual,
@@ -143,7 +146,7 @@ void write_kv_cache_batch_checked(const at::Tensor& key_cache, const at::Tensor&
 
 at::Tensor paged_attention(const at::Tensor& query, const at::Tensor& key,
     const at::Tensor& value, const at::Tensor& tables, const at::Tensor& lengths,
-    int64_t block_size, bool validate) {
+    int64_t block_size, bool validate, bool vectorized) {
     TORCH_CHECK(query.is_cuda(), "query must be CUDA");
     for (const auto& t : {key, value, tables, lengths}) {
         TORCH_CHECK(t.device() == query.device(), "all inputs must be on the same CUDA device");
@@ -172,11 +175,28 @@ at::Tensor paged_attention(const at::Tensor& query, const at::Tensor& key,
         auto active = positions.unsqueeze(0) < lengths.unsqueeze(1);
         TORCH_CHECK(!(((tables < 0) | (tables >= key.size(0))) & active).any().item<bool>(), "physical block id out of range");
     }
-    return paged_attention_cuda(query, key, value, tables, lengths, block_size);
+    return paged_attention_cuda(query, key, value, tables, lengths, block_size, vectorized);
+}
+
+at::Tensor greedy_argmax_checked(const at::Tensor& logits) {
+    TORCH_CHECK(logits.is_cuda() && logits.is_contiguous(), "greedy logits must be contiguous CUDA tensors");
+    TORCH_CHECK(logits.dim()==2 && logits.size(1)>0, "greedy logits must be [batch, nonempty vocab]");
+    TORCH_CHECK(logits.scalar_type()==at::kFloat || logits.scalar_type()==at::kHalf || logits.scalar_type()==at::kBFloat16,
+                "greedy supports FP32/FP16/BF16");
+    TORCH_CHECK(logits.size(0)<=65535 && logits.size(1)<=2147483647, "greedy logits shape too large");
+    return greedy_argmax_cuda(logits);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("paged_attention", &paged_attention, "FP16/BF16 split-KV paged decode attention");
+    m.def("paged_attention", [](const at::Tensor& q,const at::Tensor& k,const at::Tensor& v,
+        const at::Tensor& t,const at::Tensor& l,int64_t b,bool validate) {
+        return paged_attention(q,k,v,t,l,b,validate,true);
+    }, "FP16/BF16 split-KV paged decode attention");
+    m.def("paged_attention_baseline", [](const at::Tensor& q,const at::Tensor& k,const at::Tensor& v,
+        const at::Tensor& t,const at::Tensor& l,int64_t b,bool validate) {
+        return paged_attention(q,k,v,t,l,b,validate,false);
+    }, "Scalar baseline for performance ablation");
+    m.def("greedy_argmax", &greedy_argmax_checked, "Stable two-pass CUDA greedy sampling");
     m.def("rms_norm", &rms_norm_checked, "FP16/BF16 RMSNorm");
     m.def("residual_rms_norm", &residual_rms_norm_checked, "FP16/BF16 residual RMSNorm");
     m.def("silu_and_mul", &silu_and_mul_checked, "FP16/BF16 fused SiLU multiply");
@@ -186,4 +206,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("write_kv_cache", &write_kv_cache_checked, "FP16/BF16 paged KV scatter");
     m.def("write_kv_cache_batch", &write_kv_cache_batch_checked, "FP16/BF16 batched paged KV scatter");
     m.def("causal_prefill", &causal_prefill_cuda, "FP16/BF16 causal prefill attention");
+    m.def("causal_prefill_suffix", &causal_prefill_suffix_cuda, "FP16/BF16 offset causal suffix attention");
 }

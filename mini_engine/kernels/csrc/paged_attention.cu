@@ -13,7 +13,10 @@ constexpr int THREADS = 128;
 constexpr int WARPS = THREADS / 32;
 constexpr int PARTITION = 256;
 
-inline void check_launch_capture_safe(cudaStream_t) {}
+inline void check_launch_capture_safe(cudaStream_t) { C10_CUDA_KERNEL_LAUNCH_CHECK(); }
+
+// Four adjacent FP16/BF16 values are one aligned 64-bit global load.
+template <typename T> struct alignas(8) Pack4 { T v[4]; };
 
 template <bool MAXIMUM>
 __device__ float warp_reduce(float v) {
@@ -41,6 +44,78 @@ __device__ float block_reduce(float value, float* scratch) {
     float result = scratch[0];
     __syncthreads(); // protect scratch readers from the next reduction
     return result;
+}
+
+// D=128 specialization. Warps share V work across tokens instead of having
+// every output dimension walk the entire sequence serially. All page addresses
+// remain direct: no dense K/V materialization and no GQA repeat tensor.
+template <typename scalar_t>
+__global__ void attention_vector128(const scalar_t* query, const scalar_t* key,
+    const scalar_t* value, const int64_t* tables, const int64_t* lengths,
+    scalar_t* output, float* partial, float* lse, int heads, int kv_heads,
+    int num_blocks, int block_size, int table_width, int partitions) {
+    const int request = blockIdx.x / heads, head = blockIdx.x % heads;
+    const int kv_head = head / (heads / kv_heads), part = blockIdx.y;
+    const int tid = threadIdx.x, lane = tid % 32, warp = tid / 32;
+    const int64_t row = static_cast<int64_t>(blockIdx.x) * partitions + part;
+    const int length = static_cast<int>(lengths[request]), start = part * PARTITION;
+    const int count = length > start && length <= table_width * block_size
+        ? min(PARTITION, length - start) : 0;
+    __shared__ float scores[PARTITION], scratch[WARPS], sums[WARPS][128];
+    Pack4<scalar_t> qp = reinterpret_cast<const Pack4<scalar_t>*>(query)[blockIdx.x * 32 + lane];
+    float q[4];
+    #pragma unroll
+    for (int i=0; i<4; ++i) q[i] = static_cast<float>(qp.v[i]);
+    for (int t=warp; t<count; t+=WARPS) {
+        int token = start+t;
+        int64_t page = tables[static_cast<int64_t>(request)*table_width+token/block_size];
+        bool valid = page>=0 && page<num_blocks;
+        float score = 0.f;
+        if (valid) {
+            int64_t base = ((page*block_size+token%block_size)*kv_heads+kv_head)*32;
+            Pack4<scalar_t> kp = reinterpret_cast<const Pack4<scalar_t>*>(key)[base+lane];
+            #pragma unroll
+            for (int i=0; i<4; ++i) score += q[i]*static_cast<float>(kp.v[i]);
+        }
+        score = warp_reduce<false>(score);
+        if (lane==0) scores[t] = valid ? score*rsqrtf(128.f) : -INFINITY;
+    }
+    __syncthreads();
+    float m = -INFINITY;
+    for (int t=tid; t<count; t+=THREADS) m=fmaxf(m,scores[t]);
+    m=block_reduce<true>(m,scratch);
+    float sum=0.f;
+    for (int t=tid; t<count; t+=THREADS) {
+        scores[t] = isfinite(m) ? expf(scores[t]-m) : 0.f;
+        sum+=scores[t];
+    }
+    sum=block_reduce<false>(sum,scratch);
+    if (tid==0 && partitions>1) lse[row]=sum>0.f ? m+logf(sum) : -INFINITY;
+    float acc[4]={0.f,0.f,0.f,0.f};
+    for (int t=warp; t<count; t+=WARPS) {
+        int token=start+t;
+        int64_t page=tables[static_cast<int64_t>(request)*table_width+token/block_size];
+        if (page>=0 && page<num_blocks) {
+            int64_t base=((page*block_size+token%block_size)*kv_heads+kv_head)*32;
+            Pack4<scalar_t> vp=reinterpret_cast<const Pack4<scalar_t>*>(value)[base+lane];
+            #pragma unroll
+            for (int i=0; i<4; ++i) acc[i]+=scores[t]*static_cast<float>(vp.v[i]);
+        }
+    }
+    #pragma unroll
+    for (int i=0; i<4; ++i) sums[warp][lane*4+i]=acc[i];
+    __syncthreads();
+    if (warp==0) {
+        #pragma unroll
+        for (int i=0; i<4; ++i) {
+            float result=0.f;
+            #pragma unroll
+            for (int w=0; w<WARPS; ++w) result+=sums[w][lane*4+i];
+            result=sum>0.f ? result/sum : 0.f;
+            if (partitions==1) output[static_cast<int64_t>(blockIdx.x)*128+lane*4+i]=static_cast<scalar_t>(result);
+            else partial[row*128+lane*4+i]=result;
+        }
+    }
 }
 
 template <typename scalar_t, int DIM>
@@ -136,13 +211,21 @@ __global__ void merge_partitions(const float* partial, const float* lse,
 template <typename scalar_t, int DIM>
 void launch(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
             const at::Tensor& tables, const at::Tensor& lengths, at::Tensor& out,
-            at::Tensor& partial, at::Tensor& lse, int parts, cudaStream_t stream) {
+            at::Tensor& partial, at::Tensor& lse, int parts, cudaStream_t stream, bool vectorized) {
     int rows = static_cast<int>(q.size(0) * q.size(1));
+    if (DIM == 128 && vectorized) {
+        attention_vector128<scalar_t><<<dim3(rows,parts), THREADS, 0, stream>>>(
+            q.data_ptr<scalar_t>(), k.data_ptr<scalar_t>(), v.data_ptr<scalar_t>(),
+            tables.data_ptr<int64_t>(), lengths.data_ptr<int64_t>(), out.data_ptr<scalar_t>(),
+            parts>1 ? partial.data_ptr<float>() : nullptr, parts>1 ? lse.data_ptr<float>() : nullptr,
+            q.size(1), k.size(2), k.size(0), k.size(1), tables.size(1), parts);
+    } else {
     attention_partition<scalar_t, DIM><<<dim3(rows, parts), THREADS, 0, stream>>>(
         q.data_ptr<scalar_t>(), k.data_ptr<scalar_t>(), v.data_ptr<scalar_t>(),
         tables.data_ptr<int64_t>(), lengths.data_ptr<int64_t>(), out.data_ptr<scalar_t>(),
         parts > 1 ? partial.data_ptr<float>() : nullptr, parts > 1 ? lse.data_ptr<float>() : nullptr,
         q.size(1), k.size(2), k.size(0), k.size(1), tables.size(1), parts);
+    }
     check_launch_capture_safe(stream);
     if (parts > 1) {
         merge_partitions<scalar_t, DIM><<<rows, THREADS, 0, stream>>>(
@@ -154,8 +237,8 @@ void launch(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
 template <typename scalar_t>
 void dispatch(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
               const at::Tensor& tables, const at::Tensor& lengths, at::Tensor& out,
-              at::Tensor& partial, at::Tensor& lse, int parts, cudaStream_t stream) {
-    #define HEAD_CASE(D) case D: launch<scalar_t, D>(q,k,v,tables,lengths,out,partial,lse,parts,stream); break
+              at::Tensor& partial, at::Tensor& lse, int parts, cudaStream_t stream, bool vectorized) {
+    #define HEAD_CASE(D) case D: launch<scalar_t, D>(q,k,v,tables,lengths,out,partial,lse,parts,stream,vectorized); break
     switch (q.size(2)) {
         HEAD_CASE(16); HEAD_CASE(32); HEAD_CASE(64); HEAD_CASE(80);
         HEAD_CASE(96); HEAD_CASE(128); HEAD_CASE(192); HEAD_CASE(256);
@@ -165,7 +248,7 @@ void dispatch(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
 } // namespace
 
 at::Tensor paged_attention_cuda(const at::Tensor& q, const at::Tensor& k,
-    const at::Tensor& v, const at::Tensor& tables, const at::Tensor& lengths, int64_t block_size) {
+    const at::Tensor& v, const at::Tensor& tables, const at::Tensor& lengths, int64_t block_size, bool vectorized) {
     const c10::cuda::CUDAGuard guard(q.device());
     auto stream = c10::cuda::getCurrentCUDAStream(q.get_device()).stream();
     auto output = at::empty_like(q);
@@ -175,7 +258,7 @@ at::Tensor paged_attention_cuda(const at::Tensor& q, const at::Tensor& k,
         partial = at::empty({q.size(0), q.size(1), parts, q.size(2)}, q.options().dtype(at::kFloat));
         lse = at::empty({q.size(0), q.size(1), parts}, q.options().dtype(at::kFloat));
     }
-    if (q.scalar_type() == at::kHalf) dispatch<at::Half>(q,k,v,tables,lengths,output,partial,lse,parts,stream);
-    else dispatch<at::BFloat16>(q,k,v,tables,lengths,output,partial,lse,parts,stream);
+    if (q.scalar_type() == at::kHalf) dispatch<at::Half>(q,k,v,tables,lengths,output,partial,lse,parts,stream,vectorized);
+    else dispatch<at::BFloat16>(q,k,v,tables,lengths,output,partial,lse,parts,stream,vectorized);
     return output;
 }

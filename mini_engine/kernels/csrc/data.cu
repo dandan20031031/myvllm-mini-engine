@@ -11,7 +11,7 @@
 namespace {
 constexpr int THREADS = 256;
 
-inline void check_launch_capture_safe(cudaStream_t) {}
+inline void check_launch_capture_safe(cudaStream_t) { C10_CUDA_KERNEL_LAUNCH_CHECK(); }
 
 template <typename scalar_t>
 __global__ void embedding_kernel(const scalar_t* weight, const int64_t* ids, scalar_t* output,

@@ -12,7 +12,7 @@ namespace {
 constexpr int THREADS = 256;
 constexpr int WARPS = THREADS / 32;
 
-inline void check_launch_capture_safe(cudaStream_t) {}
+inline void check_launch_capture_safe(cudaStream_t) { C10_CUDA_KERNEL_LAUNCH_CHECK(); }
 
 __device__ float block_sum(float value, float* scratch) {
     const int lane = threadIdx.x % 32, warp = threadIdx.x / 32;

@@ -1,0 +1,291 @@
+{
+  "scope": "CUDA Graph replay per operator; excludes Python dispatch and service",
+  "external_load_not_controlled": true,
+  "gpu_before": "NVIDIA GeForce RTX 5080, 5 %, 2622 MiB, 44.41 W",
+  "gpu_after": "NVIDIA GeForce RTX 5080, 80 %, 3255 MiB, 228.97 W",
+  "os": "Windows-11-10.0.26200-SP0",
+  "torch": "2.9.1+cu128",
+  "cuda": "12.8",
+  "extension_sha256": "cbb6ab5852b46dd982e3fab906c481afbbddf7c350d3836edee45de58445dede",
+  "configuration": {
+    "block_sizes": [
+      16,
+      32,
+      64,
+      128,
+      256
+    ],
+    "batches": [
+      1,
+      8,
+      32
+    ],
+    "contexts": [
+      128,
+      512,
+      2048
+    ],
+    "heads": 16,
+    "kv_heads": 8,
+    "dtype": "fp16",
+    "repetitions": 20,
+    "graph_repeats": 20
+  },
+  "rows": [
+    {
+      "batch": 1,
+      "context": 128,
+      "block_size": 16,
+      "timing": {
+        "cuda_baseline": {
+          "median_ms": 0.033988799154758456,
+          "mean_ms": 0.03512527972459793
+        },
+        "cuda": {
+          "median_ms": 0.01934320032596588,
+          "mean_ms": 0.020314559936523438
+        }
+      },
+      "max_abs_error": 6.103515625e-05,
+      "paired_kernel_speedup": 1.757144556329319
+    },
+    {
+      "batch": 8,
+      "context": 512,
+      "block_size": 16,
+      "timing": {
+        "cuda_baseline": {
+          "median_ms": 0.07237679958343506,
+          "mean_ms": 0.07339280068874358
+        },
+        "cuda": {
+          "median_ms": 0.04150160104036331,
+          "mean_ms": 0.04212231993675232
+        }
+      },
+      "max_abs_error": 3.0517578125e-05,
+      "paired_kernel_speedup": 1.7439519866485003
+    },
+    {
+      "batch": 32,
+      "context": 2048,
+      "block_size": 16,
+      "timing": {
+        "cuda_baseline": {
+          "median_ms": 0.713756799697876,
+          "mean_ms": 0.7147118401527405
+        },
+        "cuda": {
+          "median_ms": 0.4003023862838745,
+          "mean_ms": 0.4043487215042114
+        }
+      },
+      "max_abs_error": 6.103515625e-05,
+      "paired_kernel_speedup": 1.7830440790620599
+    },
+    {
+      "batch": 1,
+      "context": 128,
+      "block_size": 32,
+      "timing": {
+        "cuda_baseline": {
+          "median_ms": 0.033913600444793704,
+          "mean_ms": 0.03490920007228852
+        },
+        "cuda": {
+          "median_ms": 0.01931919977068901,
+          "mean_ms": 0.020032880157232286
+        }
+      },
+      "max_abs_error": 6.103515625e-05,
+      "paired_kernel_speedup": 1.7554350515204693
+    },
+    {
+      "batch": 8,
+      "context": 512,
+      "block_size": 32,
+      "timing": {
+        "cuda_baseline": {
+          "median_ms": 0.07224319875240326,
+          "mean_ms": 0.07285519957542419
+        },
+        "cuda": {
+          "median_ms": 0.041361600160598755,
+          "mean_ms": 0.04152656003832817
+        }
+      },
+      "max_abs_error": 6.103515625e-05,
+      "paired_kernel_speedup": 1.746624851840777
+    },
+    {
+      "batch": 32,
+      "context": 2048,
+      "block_size": 32,
+      "timing": {
+        "cuda_baseline": {
+          "median_ms": 0.7153176069259644,
+          "mean_ms": 0.7151225566864013
+        },
+        "cuda": {
+          "median_ms": 0.40111600160598754,
+          "mean_ms": 0.40339847683906555
+        }
+      },
+      "max_abs_error": 6.103515625e-05,
+      "paired_kernel_speedup": 1.7833185513965462
+    },
+    {
+      "batch": 1,
+      "context": 128,
+      "block_size": 64,
+      "timing": {
+        "cuda_baseline": {
+          "median_ms": 0.03392399996519089,
+          "mean_ms": 0.035573359727859494
+        },
+        "cuda": {
+          "median_ms": 0.01919680014252663,
+          "mean_ms": 0.019917280003428458
+        }
+      },
+      "max_abs_error": 0.000244140625,
+      "paired_kernel_speedup": 1.7671695133210834
+    },
+    {
+      "batch": 8,
+      "context": 512,
+      "block_size": 64,
+      "timing": {
+        "cuda_baseline": {
+          "median_ms": 0.07241919934749602,
+          "mean_ms": 0.07439728051424027
+        },
+        "cuda": {
+          "median_ms": 0.040775999426841736,
+          "mean_ms": 0.04292479991912842
+        }
+      },
+      "max_abs_error": 6.103515625e-05,
+      "paired_kernel_speedup": 1.77602512177358
+    },
+    {
+      "batch": 32,
+      "context": 2048,
+      "block_size": 64,
+      "timing": {
+        "cuda_baseline": {
+          "median_ms": 0.7138544082641601,
+          "mean_ms": 0.7124253582954406
+        },
+        "cuda": {
+          "median_ms": 0.404417610168457,
+          "mean_ms": 0.4038157594203949
+        }
+      },
+      "max_abs_error": 6.103515625e-05,
+      "paired_kernel_speedup": 1.7651417502981872
+    },
+    {
+      "batch": 1,
+      "context": 128,
+      "block_size": 128,
+      "timing": {
+        "cuda_baseline": {
+          "median_ms": 0.03392399996519089,
+          "mean_ms": 0.035447199791669846
+        },
+        "cuda": {
+          "median_ms": 0.019179999828338623,
+          "mean_ms": 0.019491039961576462
+        }
+      },
+      "max_abs_error": 3.814697265625e-06,
+      "paired_kernel_speedup": 1.768717427988079
+    },
+    {
+      "batch": 8,
+      "context": 512,
+      "block_size": 128,
+      "timing": {
+        "cuda_baseline": {
+          "median_ms": 0.07231119871139527,
+          "mean_ms": 0.07369584053754806
+        },
+        "cuda": {
+          "median_ms": 0.04126559942960739,
+          "mean_ms": 0.042393440008163454
+        }
+      },
+      "max_abs_error": 3.0517578125e-05,
+      "paired_kernel_speedup": 1.7523360792261549
+    },
+    {
+      "batch": 32,
+      "context": 2048,
+      "block_size": 128,
+      "timing": {
+        "cuda_baseline": {
+          "median_ms": 0.7102103948593139,
+          "mean_ms": 0.709873993396759
+        },
+        "cuda": {
+          "median_ms": 0.39471360445022585,
+          "mean_ms": 0.3983411979675293
+        }
+      },
+      "max_abs_error": 3.0517578125e-05,
+      "paired_kernel_speedup": 1.799305589804855
+    },
+    {
+      "batch": 1,
+      "context": 128,
+      "block_size": 256,
+      "timing": {
+        "cuda_baseline": {
+          "median_ms": 0.033839200437068936,
+          "mean_ms": 0.03504976034164429
+        },
+        "cuda": {
+          "median_ms": 0.019064799696207047,
+          "mean_ms": 0.01972815990447998
+        }
+      },
+      "max_abs_error": 0.000244140625,
+      "paired_kernel_speedup": 1.7749570400050552
+    },
+    {
+      "batch": 8,
+      "context": 512,
+      "block_size": 256,
+      "timing": {
+        "cuda_baseline": {
+          "median_ms": 0.07203760147094726,
+          "mean_ms": 0.07378272086381912
+        },
+        "cuda": {
+          "median_ms": 0.04113920032978058,
+          "mean_ms": 0.04235600009560585
+        }
+      },
+      "max_abs_error": 6.103515625e-05,
+      "paired_kernel_speedup": 1.751069561233046
+    },
+    {
+      "batch": 32,
+      "context": 2048,
+      "block_size": 256,
+      "timing": {
+        "cuda_baseline": {
+          "median_ms": 0.713262391090393,
+          "mean_ms": 0.7161489582061767
+        },
+        "cuda": {
+          "median_ms": 0.3979352116584778,
+          "mean_ms": 0.40079584360122683
+        }
+      },
+      "max_abs_error": 0.0001220703125,
+      "paired_kernel_speedup": 1.7924083373213535
+    }
+  ]
+}

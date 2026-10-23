@@ -86,6 +86,22 @@ def test_cuda_current_stream_and_trusted_invalid_indices():
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("block_size", [16, 32, 64, 128, 256])
+def test_vector128_matches_scalar_baseline_and_graph(dtype, block_size):
+    args = inputs(dtype, block_size=block_size, lengths=(1, 255, 257, 519))
+    expected = paged_attention(*args, backend="cuda_baseline", validate=False)
+    actual = paged_attention(*args, backend="cuda", validate=False)
+    torch.testing.assert_close(actual, expected, atol=0.006 if dtype == torch.bfloat16 else 0.001, rtol=0.025)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        out = paged_attention(*args, backend="cuda", validate=False)
+    args[0].mul_(0.5)
+    graph.replay()
+    expected = paged_attention(*args, backend="torch")
+    torch.testing.assert_close(out, expected, atol=0.006 if dtype == torch.bfloat16 else 0.001, rtol=0.025)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_native_logits_use_cuda_decode(dtype):
     from mini_engine.model import NativeQwen3, Qwen3Config
 

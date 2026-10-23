@@ -1,6 +1,7 @@
 """Lazy Windows CUDA extension build. Importing this file never runs nvcc."""
 
 from functools import lru_cache
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -38,12 +39,25 @@ def load_cuda_extension(verbose=False):
     if match and match.group(1) != torch.version.cuda:
         warnings.warn(f"Toolkit {match.group(1)} differs from PyTorch CUDA {torch.version.cuda}; "
                       "this combination must pass runtime tests on the target machine.", stacklevel=2)
-    build = root / "build" / "torch_extensions" / "paged_attention"
-    build.mkdir(parents=True, exist_ok=True)
     source = Path(__file__).parent / "csrc"
+    sources = [source / name for name in ("bindings.cpp", "paged_attention.cu", "elementwise.cu", "data.cu", "prefill.cu", "sampling.cu")]
+    # Windows locks loaded .pyd files. Content-addressed builds allow an old
+    # chat process to keep running while a new source revision is compiled.
+    # They also prevent a failed rebuild from importing a stale binary whose
+    # exported operators no longer match the Python wrapper.
+    fingerprint = hashlib.sha256()
+    for path in sources:
+        fingerprint.update(path.name.encode())
+        fingerprint.update(path.read_bytes())
+    fingerprint.update(str((torch.__version__, torch.version.cuda, str(CUDA_HOME),
+                            version, os.environ.get("TORCH_CUDA_ARCH_LIST"),
+                            torch.cuda.get_device_capability())).encode())
+    build_id = fingerprint.hexdigest()[:16]
+    build = root / "build" / "torch_extensions" / "paged_attention" / build_id
+    build.mkdir(parents=True, exist_ok=True)
     return load(
-        name="miniqwen_paged_attention",
-        sources=[str(source / "bindings.cpp"), str(source / "paged_attention.cu"), str(source / "elementwise.cu"), str(source / "data.cu"), str(source / "prefill.cu")],
+        name=f"miniqwen_paged_attention_{build_id}",
+        sources=[str(path) for path in sources],
         build_directory=str(build),
         extra_cflags=["/O2", "/utf-8", "/Zc:preprocessor"] if sys.platform == "win32" else ["-O3"],
         extra_cuda_cflags=["-O3", "--expt-relaxed-constexpr", "-lineinfo"]

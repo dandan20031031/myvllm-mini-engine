@@ -10,26 +10,28 @@
 namespace {
 constexpr int THREADS = 128;
 
-inline void check_launch_capture_safe(cudaStream_t) {}
+inline void check_launch_capture_safe(cudaStream_t) { C10_CUDA_KERNEL_LAUNCH_CHECK(); }
 
 template <typename scalar_t>
 __global__ void causal_prefill_kernel(
     const scalar_t* q, const scalar_t* k, const scalar_t* v, scalar_t* out,
-    int64_t batch, int64_t q_heads, int64_t kv_heads, int64_t tokens, int64_t dim) {
+    int64_t batch, int64_t q_heads, int64_t kv_heads, int64_t tokens, int64_t dim,
+    int64_t kv_tokens, int64_t query_start) {
     const int64_t row = blockIdx.x;
     const int64_t rows = batch * q_heads * tokens;
     if (row >= rows) return;
     const int64_t tq = row % tokens;
+    const int64_t last_key = query_start + tq;
     const int64_t qh = (row / tokens) % q_heads;
     const int64_t b = row / (q_heads * tokens);
     const int64_t kvh = qh / (q_heads / kv_heads);
     extern __shared__ float scores[];
-    float* meta = scores + tokens;
+    float* meta = scores + kv_tokens;
     const float scale = rsqrtf(static_cast<float>(dim));
-    for (int64_t tk = threadIdx.x; tk <= tq; tk += THREADS) {
+    for (int64_t tk = threadIdx.x; tk <= last_key; tk += THREADS) {
         float dot = 0.0f;
         const int64_t qbase = ((b * q_heads + qh) * tokens + tq) * dim;
-        const int64_t kbase = ((b * kv_heads + kvh) * tokens + tk) * dim;
+        const int64_t kbase = ((b * kv_heads + kvh) * kv_tokens + tk) * dim;
         for (int64_t d = 0; d < dim; ++d)
             dot += static_cast<float>(q[qbase + d]) * static_cast<float>(k[kbase + d]);
         scores[tk] = dot * scale;
@@ -37,9 +39,9 @@ __global__ void causal_prefill_kernel(
     __syncthreads();
     if (threadIdx.x == 0) {
         float maximum = -INFINITY;
-        for (int64_t tk = 0; tk <= tq; ++tk) maximum = fmaxf(maximum, scores[tk]);
+        for (int64_t tk = 0; tk <= last_key; ++tk) maximum = fmaxf(maximum, scores[tk]);
         float denominator = 0.0f;
-        for (int64_t tk = 0; tk <= tq; ++tk) {
+        for (int64_t tk = 0; tk <= last_key; ++tk) {
             scores[tk] = expf(scores[tk] - maximum);
             denominator += scores[tk];
         }
@@ -51,8 +53,8 @@ __global__ void causal_prefill_kernel(
     const int64_t outbase = ((b * q_heads + qh) * tokens + tq) * dim;
     for (int64_t d = threadIdx.x; d < dim; d += THREADS) {
         float value = 0.0f;
-        for (int64_t tk = 0; tk <= tq; ++tk) {
-            const int64_t vbase = ((b * kv_heads + kvh) * tokens + tk) * dim;
+        for (int64_t tk = 0; tk <= last_key; ++tk) {
+            const int64_t vbase = ((b * kv_heads + kvh) * kv_tokens + tk) * dim;
             value += scores[tk] * static_cast<float>(v[vbase + d]);
         }
         out[outbase + d] = static_cast<scalar_t>(value / denominator);
@@ -62,28 +64,35 @@ __global__ void causal_prefill_kernel(
 
 template <typename scalar_t>
 void launch_prefill(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
-                    at::Tensor& output, cudaStream_t stream) {
+                    at::Tensor& output, cudaStream_t stream, int64_t query_start) {
     const int64_t rows = q.size(0) * q.size(1) * q.size(2);
-    const size_t shared = static_cast<size_t>(q.size(2) + 2) * sizeof(float);
+    const size_t shared = static_cast<size_t>(k.size(2) + 2) * sizeof(float);
     causal_prefill_kernel<scalar_t><<<static_cast<unsigned int>(rows), THREADS, shared, stream>>>(
         q.data_ptr<scalar_t>(), k.data_ptr<scalar_t>(), v.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
-        q.size(0), q.size(1), k.size(1), q.size(2), q.size(3));
+        q.size(0), q.size(1), k.size(1), q.size(2), q.size(3), k.size(2), query_start);
     check_launch_capture_safe(stream);
 }
 
-at::Tensor causal_prefill_cuda(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v) {
-    const c10::cuda::CUDAGuard guard(q.device());
+at::Tensor causal_prefill_suffix_cuda(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, int64_t query_start) {
     TORCH_CHECK(q.is_cuda() && k.is_cuda() && v.is_cuda(), "prefill tensors must be CUDA");
+    const c10::cuda::CUDAGuard guard(q.device());
+    TORCH_CHECK(q.device()==k.device() && q.device()==v.device(), "prefill tensors must share device");
     TORCH_CHECK(q.is_contiguous() && k.is_contiguous() && v.is_contiguous(), "prefill tensors must be contiguous");
     TORCH_CHECK(q.dim() == 4 && k.dim() == 4 && v.sizes() == k.sizes(), "invalid prefill tensor shapes");
-    TORCH_CHECK(q.size(0) == k.size(0) && q.size(2) == k.size(2) && q.size(3) == k.size(3), "prefill shape mismatch");
-    TORCH_CHECK(q.size(1) % k.size(1) == 0, "prefill GQA mismatch");
+    TORCH_CHECK(q.size(0)>0 && q.size(0) == k.size(0) && q.size(3)>0 && q.size(3) == k.size(3), "prefill shape mismatch");
+    TORCH_CHECK(k.size(1)>0 && q.size(1)>0 && q.size(1) % k.size(1) == 0, "prefill GQA mismatch");
+    TORCH_CHECK(query_start>=0 && q.size(2)>0 && query_start+q.size(2)<=k.size(2), "prefill query range exceeds KV sequence");
     TORCH_CHECK(q.scalar_type() == at::kHalf || q.scalar_type() == at::kBFloat16, "prefill requires FP16/BF16");
     TORCH_CHECK(k.scalar_type() == q.scalar_type() && v.scalar_type() == q.scalar_type(), "prefill dtype mismatch");
-    TORCH_CHECK(q.size(2) > 0 && q.size(2) <= 8192, "CUDA prefill supports 1..8192 tokens; use SDPA for longer prompts");
+    TORCH_CHECK(k.size(2) > 0 && k.size(2) <= 8192, "CUDA prefill supports 1..8192 tokens; use SDPA for longer prompts");
     auto output = at::empty_like(q);
     auto stream = c10::cuda::getCurrentCUDAStream(q.get_device()).stream();
-    if (q.scalar_type() == at::kHalf) launch_prefill<at::Half>(q, k, v, output, stream);
-    else launch_prefill<at::BFloat16>(q, k, v, output, stream);
+    if (q.scalar_type() == at::kHalf) launch_prefill<at::Half>(q, k, v, output, stream, query_start);
+    else launch_prefill<at::BFloat16>(q, k, v, output, stream, query_start);
     return output;
+}
+
+at::Tensor causal_prefill_cuda(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v) {
+    TORCH_CHECK(q.dim()==4 && k.dim()==4 && q.size(2)==k.size(2), "square prefill requires equal Q/K lengths");
+    return causal_prefill_suffix_cuda(q,k,v,0);
 }
