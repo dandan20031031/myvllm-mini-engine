@@ -26,7 +26,7 @@ NativeQwen3Runner -- NativeQwen3 -- QuantBackend / ReferenceQuantLinear
     KVCachePool          CUDA kernels / PyTorch reference
 ~~~
 
-当前单请求 NativeQwen3Runner 自己持有 BlockManager 和 KVCachePool，尚未接到 Scheduler 的真实批量执行。不得把已有调度器骨架描述为已完成并发推理。
+单请求 NativeQwen3Runner 持有 BlockManager 和 KVCachePool；create_batch_runtime 将它们接到 Scheduler、NativeBatchRuntime 和 DecodeGraphManager，实现真实 batch decode。Prefill 仍逐请求执行。
 
 KV 布局是 [layer, physical_block, token_in_block, kv_head, head_dim]。KV 精度当前与浮点模型一致；低精度权重不代表低精度 KV。
 
@@ -65,7 +65,7 @@ Tokenizer、HTTP、请求队列和 block 所有权由 CPU 处理。
 | FP16/BF16 | 默认浮点及自研 kernel | 全算子覆盖 |
 | TF32 | FP32 GEMM 策略，尚未提供项目级开关 | 显式控制和记录，不视为存储量化 |
 | W8A16/W8A32 INT8 | per-channel 打包、FP32 scale、native Linear reference | fused dequant / CUDA GEMM |
-| W4A16/W4A32 INT4 | group-wise 两个 nibble/byte、native Linear reference | CUDA packing/dequant/GEMM |
+| W4A16/W4A32 INT4 | reference 保留；可选 dandan W4A16 CUDA GEMV/Tensor Core，source group64/128 无损转换为存储group64 | 形状路由、模型质量和速度优化 |
 | FP8 E4M3FN/E5M2 | scaled weight-only reference、native Linear，非 W8A8 | 评估 FP8 Tensor Core GEMM、激活缩放 |
 | MXFP8 | reserved | 定义微缩放、布局、Windows 后端 |
 | NVFP4 | reserved | FP4 E2M1、块 scale 和额外 scale 策略、Windows CUDA GEMM |
@@ -73,7 +73,7 @@ Tokenizer、HTTP、请求队列和 block 所有权由 CPU 处理。
 
 RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证明 NVFP4 已可用。不能以 INT4 或普通 FP8 冒充 NVFP4/MXFP8。每种格式分别验收：接口、reference、CUDA kernel、模型集成、性能收益。
 
-当前 native 量化替换每层 Q/K/V/O、Gate/Up/Down 七类 projection，保留浮点 embedding、norm、residual、lm_head 和 KV。reference 每次先反量化为 FP32 再 linear，可能更慢，不宣称量化加速。
+当前 native 量化替换 decoder projection，保留浮点 embedding、norm、residual、lm_head 和 KV。reference 每次先反量化为 FP32 再 linear。可选 dandan 后端在 tile 内反量化，支持先融合 QKV/GateUp 再量化；存在 CUDA 计算路径不代表已取得端到端加速。
 
 ## 5. 阶段状态
 
@@ -99,7 +99,8 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 | 18 | Projection Fusion：QKV、Gate/Up 合并矩阵乘，减少 decode GEMM/launch | 完成首轮；单请求和 batch Graph 已验证，继续优化 |
 | 19 | 真实 batch CUDA Graph：eager/Graph 公平 TPOT、TPS、P50/P95 | 完成首轮；3 请求/32 token Graph benchmark 已通过，完整分位数和多 batch sweep 待扩展 |
 | 20 | PagedAttention kernel：vectorized load、flash-decoding、block size sweep | 待实现 |
-| 21 | 高性能量化：INT4/FP8 Tensor Core GEMM、FP8/INT8 KV、NVFP4/MXFP8 探索 | 待实现 |
+| 21 | 高性能量化：INT4/FP8 Tensor Core GEMM、FP8/INT8 KV、NVFP4/MXFP8 探索 | INT4 CUDA接入已在22完成；其余待实现，性能/质量继续评估 |
+| 22 | 可选 dandan_ops：FP16 Linear、W4A16 bridge、GQA Flash prefill、融合/Graph验证和同口径 benchmark | 功能/数值验收完成，201 tests通过；公平性能重测待空闲GPU和固定库版本，见 reports/STAGE_22_DANDAN_BACKEND.md |
 
 后续可按实测瓶颈调整算子顺序，并更新本文件。vLLM 不作为 Windows 引擎运行依赖；若比较环境使用不同 OS，必须披露差异，不能宣称严格同环境。
 
@@ -113,7 +114,7 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 - 单算子记录 device timeline 和 eager wall time，端到端包含调度与同步；不混用口径。
 - 所有阶段生成 reports/STAGE_XX_*.md，解释每个模块、数据布局、调用链、测试结果、限制和下一阶段接口。
 
-当前全量回归为 156 passed、2 warnings；CUDA 测试在 RTX 5080 上实际执行通过。完整 Qwen3-0.6B 已完成文本生成、单请求 TTFT/TPOT 和真实 batch CUDA Graph benchmark 验收。
+2026-10-23阶段22全量回归为201 passed、2 warnings；CUDA测试在RTX 5080上实际执行通过。完整Qwen3-0.6B已有历史生成/Graph benchmark，并新增FP16 dandan、W4A16和Flash prefill短序列数值验收。本轮backend性能对照受并发负载与外部库修改影响，不作为正式加速结论。
 
 阶段 05 Event 测量可能包括 Python 调度空隙，reference 包含 gather/同步/循环，历史加速比不能视为纯 kernel 或相对 vLLM 的结论。阶段 07 同时报告 Graph 重放和 eager wall；Graph 时间也包含节点调度，不称作纯指令时间。Paged Attention 和 elementwise 的加速数字是单算子或 reference 对比，不能直接外推为端到端 tokens/s。
 
@@ -121,7 +122,7 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 
 ## 7. Git 工作流和存储
 
-- 已初始化 main，未配置 remote；默认仅本地 commit，不自动 push。
+- 已配置 GitHub origin；按用户约定，每阶段在 `codex/` 分支完成验证和 commit，完成的工作合入 main 并同步远端。保留未完成的独立改动，不提交模型/缓存或凭据。
 - d451ade：阶段 00–05 历史基线，不伪造早期分阶段历史。
 - 082fd64：阶段 06 INT4/FP8 reference。
 - 阶段 07 在测试、报告和计划检查完成后创建本地 commit；后续每阶段同样执行。
@@ -152,6 +153,10 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 系统创新主线为：CUDA kernels + Paged KV Cache + Continuous Batching + Prefix Cache + CUDA Graph + Projection Fusion + Precision-aware KV + Windows local application。
 
 ### 性能优化执行顺序
+
+2026-10-23 调整：18/19 首轮完成后，先执行阶段22接入现成的 dandan_ops，不要求引擎等待算子库最终优化。三种正式路径为 BF16 CUDA/cuBLAS 基线、FP16 dandan 可选后端、INT4+FP16 W4A16。保持默认后端不变；显式后端缺失能力/不兼容配置要提前报错。记录库源码、二进制及路由 profile 指纹；每次升级重新验证 logits/KV/Graph 和端到端性能。
+
+阶段22之后回到阶段20：PagedAttention profiling、向量化 KV load、block size sweep；然后补 Prefix 命中跳过计算、chunked/batched prefill、采样。阶段21剩余FP8 GEMM/低精度KV及阶段17投机解码继续后置。以下18/19顺序作为已完成工作的背景。
 
 MiniVLLM 的 RTX 5080 profiler 显示，eager decode 的主要问题是 CPU kernel launch 空洞，GPU 时间主要集中在小 batch GEMM；其 PagedAttention 只占较小比例。因此优化顺序固定为：
 

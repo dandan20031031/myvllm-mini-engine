@@ -8,4 +8,5 @@ def test_cli_help_lists_cuda_prefill(monkeypatch, capsys):
     except SystemExit as error:
         assert error.code == 0
     output = capsys.readouterr().out
-    assert "{auto,flash,math,cuda}" in output
+    assert "{auto,flash,math,cuda,dandan}" in output
+    assert "--quant-backend {reference,dandan}" in output

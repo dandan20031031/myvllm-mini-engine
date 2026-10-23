@@ -8,9 +8,13 @@ this makes the performance backend visible without claiming a custom GEMM.
 import torch
 from torch import nn
 
+from .dandan_backend import DANDAN_LINEAR_BACKENDS, LINEAR_BACKENDS, require_dandan_ops
+
 
 class CudaLinear(nn.Linear):
     """Inference Linear that makes the CUDA matmul boundary explicit."""
+
+    backend = "cuda"
 
     def forward(self, x):
         if not x.is_cuda or not self.weight.is_cuda:
@@ -25,6 +29,31 @@ class CudaLinear(nn.Linear):
         return output.reshape(*original_shape[:-1], self.out_features)
 
 
+def _dandan_linear(x, weight, bias, backend):
+    if not x.is_cuda or not weight.is_cuda or x.dtype != torch.float16 or weight.dtype != torch.float16:
+        raise ValueError("dandan Linear requires CUDA FP16 input and weights")
+    if torch.is_grad_enabled() and (x.requires_grad or weight.requires_grad):
+        raise ValueError("dandan Linear is inference-only; use torch.inference_mode()")
+    ops = require_dandan_ops()
+    output = ops.gemm(x, weight, weight_transposed=True,
+                      backend="auto" if backend == "dandan" else "cuda")
+    return output if bias is None else output + bias
+
+
+class DandanLinear(nn.Linear):
+    """Keep nn.Linear checkpoints and [N,K] weights; load the library on demand."""
+
+    def __init__(self, in_features, out_features, *, bias=False, backend="dandan"):
+        super().__init__(in_features, out_features, bias=bias)
+        self.backend = backend
+
+    def forward(self, x):
+        if x.ndim < 1 or x.shape[-1] != self.in_features:
+            raise ValueError("input feature dimension does not match Linear")
+        output = _dandan_linear(x.reshape(-1, self.in_features), self.weight, self.bias, self.backend)
+        return output.reshape(*x.shape[:-1], self.out_features)
+
+
 class FusedLinear(nn.Module):
     """Concatenated output projection used to reduce small GEMM launches.
 
@@ -36,8 +65,8 @@ class FusedLinear(nn.Module):
 
     def __init__(self, in_features, out_features, *, bias=False, backend="torch", device=None, dtype=None):
         super().__init__()
-        if backend not in {"torch", "cuda"}:
-            raise ValueError("linear backend must be torch or cuda")
+        if backend not in LINEAR_BACKENDS:
+            raise ValueError("unknown linear backend")
         self.in_features = int(in_features)
         self.out_features = int(out_features)
         self.backend = backend
@@ -91,9 +120,12 @@ class FusedLinear(nn.Module):
             raise ValueError("input feature dimension does not match fused Linear")
         original_shape = x.shape
         flat = x.reshape(-1, self.in_features)
-        output = torch.mm(flat, self.weight.t())
-        if self.bias is not None:
-            output = output + self.bias
+        if self.backend in DANDAN_LINEAR_BACKENDS:
+            output = _dandan_linear(flat, self.weight, self.bias, self.backend)
+        else:
+            output = torch.mm(flat, self.weight.t())
+            if self.bias is not None:
+                output = output + self.bias
         return output.reshape(*original_shape[:-1], self.out_features)
 
 
@@ -102,4 +134,6 @@ def make_linear(in_features, out_features, *, bias, backend="torch"):
         return nn.Linear(in_features, out_features, bias=bias)
     if backend == "cuda":
         return CudaLinear(in_features, out_features, bias=bias)
-    raise ValueError("linear backend must be torch or cuda")
+    if backend in DANDAN_LINEAR_BACKENDS:
+        return DandanLinear(in_features, out_features, bias=bias, backend=backend)
+    raise ValueError("unknown linear backend")

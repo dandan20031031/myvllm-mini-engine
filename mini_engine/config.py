@@ -13,7 +13,8 @@ class QuantConfig:
     """Weight storage format; activation precision is independent.
 
     fp8 aliases fp8_e4m3. MXFP8/NVFP4 are reserved, explicitly unavailable.
-    The implemented low-bit paths are dequantize + FP32 Linear references.
+    Reference low-bit paths dequantize into FP32. The optional dandan compute
+    backend supports INT4 weights with FP16 activations (group size 64/128).
     """
 
     weight_dtype: WeightDType = "bf16"

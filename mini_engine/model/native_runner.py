@@ -24,9 +24,29 @@ class NativeQwen3Runner:
     @classmethod
     def from_pretrained(cls, path, *, device="cuda", dtype=torch.bfloat16, prefill_backend="auto", decode_backend="torch", elementwise_backend="torch", data_backend="torch", linear_backend="torch",
                         num_blocks=256, block_size=16, enable_thinking=False, local_files_only=False,
-                        quantization=None, fuse_projections=False):
+                        quantization=None, fuse_projections=False, quant_backend="reference"):
         from ..runtime import configure_local_cache
         configure_local_cache()
+        from ..kernels.dandan_backend import DANDAN_LINEAR_BACKENDS, LINEAR_BACKENDS, validate_dandan_runtime
+        if linear_backend not in LINEAR_BACKENDS:
+            raise ValueError("unknown linear backend")
+        if quant_backend not in {"reference", "dandan"}:
+            raise ValueError("quant backend must be reference or dandan")
+        if quant_backend == "dandan":
+            from ..quantization.dandan import validate_quant_config
+            validate_quant_config(quantization)
+            if dtype != torch.float16:
+                raise ValueError("dandan quant backend requires FP16 weights/activations")
+        if quant_backend == "reference" and quantization is not None and fuse_projections:
+            raise ValueError("reference quantization and projection fusion cannot be combined yet")
+        if linear_backend in DANDAN_LINEAR_BACKENDS or quant_backend == "dandan" or prefill_backend == "dandan":
+            validate_dandan_runtime(device, dtype)
+        if prefill_backend == "dandan" or quant_backend == "dandan":
+            from ..kernels.dandan_backend import require_dandan_capability
+            if prefill_backend == "dandan":
+                require_dandan_capability("prefill")
+            if quant_backend == "dandan":
+                require_dandan_capability("int4")
         if quantization is not None:
             from ..quantization import create_backend
             create_backend(quantization)  # Reject unavailable formats before downloading weights.
@@ -45,25 +65,29 @@ class NativeQwen3Runner:
                 raise ValueError("CUDA data kernels require CUDA device and FP16/BF16 weights")
             from ..kernels.cuda_extension import load_cuda_extension
             load_cuda_extension()
-        if linear_backend in {"cuda", "dandan", "dandan_cuda", "dandan_tma"} and not str(device).startswith("cuda"):
+        if linear_backend == "cuda" and not str(device).startswith("cuda"):
             raise ValueError("CUDA linear backend requires a CUDA device")
-        if linear_backend in {"dandan", "dandan_cuda", "dandan_tma"}:
-            if dtype != torch.float16:
-                raise ValueError("dandan linear backend currently requires --dtype fp16; BF16 support is planned")
-            import dandan_ops  # noqa: F401 - fail before loading model on missing package
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
+        if prefill_backend == "dandan":
+            from transformers import AutoConfig
+            config = AutoConfig.from_pretrained(path, local_files_only=local_files_only)
+            head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+            if head_dim != 128:
+                raise ValueError("dandan prefill requires head_dim=128")
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=local_files_only)
         reference = AutoModelForCausalLM.from_pretrained(
             path, torch_dtype=dtype, local_files_only=local_files_only,
         ).to(device).eval()
         native = NativeQwen3.from_hf_model(reference, prefill_backend, decode_backend, elementwise_backend, data_backend, linear_backend)
+        if prefill_backend == "dandan" and native.config.head_dim != 128:
+            raise ValueError("dandan prefill requires head_dim=128")
         if fuse_projections:
             native.enable_projection_fusion()
         stop_ids = reference.generation_config.eos_token_id
         del reference
         if quantization is not None:
-            native.quantize(quantization)
+            native.quantize(quantization, backend=quant_backend)
         return cls(native, tokenizer, num_blocks=num_blocks, block_size=block_size,
                    enable_thinking=enable_thinking, eos_token_ids=stop_ids)
 
@@ -161,7 +185,7 @@ class NativeQwen3Runner:
             )
         if graph_manager is not None and graph_padding_block_ids is None:
             if graph_padding_blocks <= 0:
-                graph_padding_blocks = max(graph_manager.block_buckets)
+                graph_padding_blocks = max(max(graph_manager.block_buckets), max(getattr(graph_manager, "batch_sizes", (1,))))
             graph_padding_block_ids = self.block_manager.allocate(
                 # BlockManager.allocate receives a token count, while the
                 # graph manager expresses scratch capacity in physical pages.

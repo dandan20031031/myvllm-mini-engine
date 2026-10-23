@@ -24,6 +24,8 @@ MiniQwenEngine 是一个面向 Qwen3-0.6B 的 Windows 11 单 GPU 推理引擎，
 - 显式 CUDA Linear，底层使用 PyTorch 的 cuBLAS/cuBLASLt dispatch；
 - CUDA Graph decode bucket，支持固定 buffer、padding slot 和 replay；
 - QKV projection、Gate/Up projection fusion，减少小矩阵乘和 launch 次数。
+- 可选 `dandan_ops` FP16 Linear 和 D=128 GQA Flash prefill，保持独立安装；
+- 可选 W4A16 CUDA GEMV/Tensor Core，支持融合投影和 CUDA Graph decode。
 
 ### 精度和量化
 
@@ -34,7 +36,7 @@ MiniQwenEngine 是一个面向 Qwen3-0.6B 的 Windows 11 单 GPU 推理引擎，
 - NVIDIA FP8、NVFP4、MXFP8 能力探测；
 - 量化路径区分 reference dequant 和真正的 Tensor Core GEMM。
 
-NVFP4、MXFP8、FP8/INT8 KV Cache 和高性能 INT4/FP8 GEMM 仍在开发中。当前量化 reference 不应被当作已经完成的量化加速。
+INT4 可选择 `reference` 或 `dandan` 计算后端。后者使用真实 W4A16 CUDA kernel；是否加速取决于 batch/形状，需要实测。NVFP4、MXFP8、FP8/INT8 KV Cache 和 FP8 GEMM 仍在开发中。
 
 ## 快速开始
 
@@ -124,6 +126,20 @@ Chat 中支持：
   --fuse-projections --local-files-only
 ```
 
+### 可选 dandan_ops 后端
+
+先按照独立算子库的构建说明，将 `dandan_ops` 安装到本项目 `.venv`，匹配 Python/PyTorch/CUDA ABI。引擎不自动下载或编译该库，也没有本机绝对路径依赖；本机已验证 PyTorch 2.9.1+cu128、CUDA 12.8、SM120、W4A16 contract v2。
+
+在上面的启动命令中替换或添加以下参数即可：
+
+| 模式 | 参数 |
+|---|---|
+| BF16 基线 | `--dtype bf16 --linear-backend cuda --prefill-backend cuda` |
+| FP16 GEMM + Flash prefill | `--dtype fp16 --linear-backend dandan --prefill-backend dandan --fuse-projections` |
+| W4A16 + Flash prefill | `--dtype fp16 --linear-backend cuda --prefill-backend dandan --quantization int4 --quant-backend dandan --quant-group-size 128 --fuse-projections` |
+
+`dandan` Linear 允许库按形状选择 cuBLAS/HGEMM/TMA；`dandan_cuda` 强制自研 HGEMM。W4A16 支持源 group64/128，转换后存储group64，保留原始对称量化值；embedding、LM head、Norm 和 KV 保持 FP16。Flash prefill 严格要求 CUDA FP16、head_dim=128，decode 继续使用引擎分页 kernel。
+
 ### 运行测试
 
 CPU/reference 回归：
@@ -139,6 +155,16 @@ CUDA 回归：
 $env:MINI_ENGINE_TEST_CUDA = "1"
 .\.venv\Scripts\python -m pytest -q -o cache_dir=build/pytest_cache
 ```
+
+本机阶段22回归为 `201 passed, 2 warnings`，包含 FP16/W4A16、GQA Flash 和真实 batch Graph 的 logits/KV 测试。完整0.6B后端数值验收可运行：
+
+```powershell
+.\.venv\Scripts\python benchmarks\validate_dandan_qwen3.py `
+  --model "D:\models\Qwen3-0.6B" --linear-backend dandan_cuda `
+  --prefill-backend dandan --fuse-projections --decode-steps 4
+```
+
+该验收区分量化变化和相同权重下的kernel误差。INT4可能改变模型输出，仍需评估任务质量。
 
 ## 性能 Benchmark
 
@@ -213,6 +239,8 @@ median TPOT: 约 20–21 ms/token
 
 结果文件默认被 `.gitignore` 排除，避免把机器相关 benchmark JSON 和模型路径提交到公开仓库。
 
+新后端对照可添加 `--dtype fp16 --fuse-projections --ignore-eos --prefix-cache disabled`，再分别选择 Linear/Prefill/量化后端。脚本记录实际输出token、重复样本P95及算子库文件指纹变化。本轮dandan性能样本受到GPU并发负载和库文件修改影响，不能与上表混算加速比；可提交数值摘要见 [验证记录](reports/stage22_backend_validation_summary.json)。
+
 ## 项目结构
 
 ```text
@@ -234,10 +262,10 @@ PROJECT_STATUS.md   当前项目总览、已实现能力和后续方向
 - prefill 仍然逐请求执行，chunked/batched prefill 尚未完成；
 - Prefix Cache 已共享完整物理 block，但尚未完全跳过 prompt 计算；
 - CUDA Graph 当前重点是 batch decode，sampling 仍在 Graph 外；
-- INT4/FP8 高性能 GEMM、FP8/INT8 KV、NVFP4/MXFP8 尚未完成；
+- W4A16 已有可选 CUDA 后端，量化质量和多形状性能仍需评估；FP8 GEMM、FP8/INT8 KV、NVFP4/MXFP8 尚未完成；
 - Windows HTTP/OpenAI/SSE 服务尚未完成；
 - 投机解码已规划但尚未实现；
-- `dandan_ops` 是后续计划接入的独立高性能算子库，当前公开主线默认使用项目 CUDA/cuBLAS backend；
+- `dandan_ops` 为可选独立算子库；默认仍使用项目 CUDA/cuBLAS backend；
 - 尚未完成与 vLLM、SGLang、TensorRT-LLM 的完全同口径端到端对比。
 
 ## 许可证

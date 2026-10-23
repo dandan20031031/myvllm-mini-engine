@@ -13,6 +13,7 @@ from ..cache import KVCachePool
 from ..kernels.data import apply_rope as apply_rope_backend, embedding_lookup, write_kv_cache_batch
 from ..kernels.elementwise import residual_add, residual_rms_norm, rms_norm, silu_and_mul
 from ..kernels.linear import FusedLinear, make_linear
+from ..kernels.dandan_backend import DANDAN_LINEAR_BACKENDS, LINEAR_BACKENDS
 from ..kernels.paged import paged_attention
 from ..kernels.prefill import prefill_attention
 
@@ -168,6 +169,7 @@ class MLP(nn.Module):
         self.up_proj = make_linear(config.hidden_size, config.intermediate_size, bias=False, backend=linear_backend)
         self.down_proj = make_linear(config.intermediate_size, config.hidden_size, bias=False, backend=linear_backend)
         self.elementwise_backend = elementwise_backend
+        self.linear_backend = linear_backend
         self.gate_up_proj = None
 
     @property
@@ -179,7 +181,7 @@ class MLP(nn.Module):
         if self.gate_up_proj is not None:
             return False
         self.gate_up_proj = FusedLinear.from_linears(
-            (self.gate_proj, self.up_proj), backend=self.down_proj.backend if hasattr(self.down_proj, "backend") else "torch"
+            (self.gate_proj, self.up_proj), backend=self.linear_backend
         )
         del self.gate_proj
         del self.up_proj
@@ -236,7 +238,7 @@ class NativeQwen3(nn.Module):
     def __init__(self, config: Qwen3Config, prefill_backend="auto", decode_backend="torch", elementwise_backend="torch", data_backend="torch", linear_backend="torch"):
         super().__init__()
         self.config = config
-        if prefill_backend not in {"auto", "flash", "math", "cuda"}:
+        if prefill_backend not in {"auto", "flash", "math", "cuda", "dandan"}:
             raise ValueError("unknown prefill backend")
         self.prefill_backend = prefill_backend
         if decode_backend not in {"torch", "cuda"}:
@@ -248,8 +250,8 @@ class NativeQwen3(nn.Module):
         if data_backend not in {"torch", "cuda"}:
             raise ValueError("data backend must be torch or cuda")
         self.data_backend = data_backend
-        if linear_backend not in {"torch", "cuda", "dandan", "dandan_cuda", "dandan_tma"}:
-            raise ValueError("linear backend must be torch or cuda")
+        if linear_backend not in LINEAR_BACKENDS:
+            raise ValueError("unknown linear backend")
         self.linear_backend = linear_backend
         self.quantization_report = None
         self.projection_fusion_enabled = False
@@ -267,11 +269,26 @@ class NativeQwen3(nn.Module):
         model.load_state_dict(reference.state_dict(), strict=True, assign=True)
         return model.eval()
 
-    def quantize(self, config):
+    def quantize(self, config, *, backend="reference"):
+        if backend == "dandan":
+            from ..quantization.dandan import quantize_dandan_linears
+            return quantize_dandan_linears(self, config)
+        if backend != "reference":
+            raise ValueError("quant backend must be reference or dandan")
         if self.projection_fusion_enabled:
             raise ValueError("quantization and projection fusion cannot be combined yet")
         from ..quantization.linear import quantize_model_linears
         return quantize_model_linears(self, config)
+
+    def backend_report(self):
+        report = {"linear_backend": self.linear_backend, "prefill_backend": self.prefill_backend,
+                  "decode_backend": self.decode_backend, "projection_fusion": self.projection_fusion_enabled,
+                  "quantization": self.quantization_report}
+        if (self.linear_backend in DANDAN_LINEAR_BACKENDS or self.prefill_backend == "dandan"
+                or (self.quantization_report or {}).get("accelerated_quant_gemm")):
+            from ..kernels.dandan_backend import dependency_report
+            report["dandan_ops"] = dependency_report()
+        return report
 
     def enable_projection_fusion(self):
         """Fuse QKV and Gate/Up projections after HF weights are loaded.

@@ -1,0 +1,350 @@
+{
+  "stage": 22,
+  "model": "Qwen3-0.6B",
+  "environment": {
+    "os": "Windows 11",
+    "gpu": "NVIDIA GeForce RTX 5080",
+    "pytorch": "2.9.1+cu128",
+    "torch_cuda_runtime": "12.8"
+  },
+  "numerical_validation": {
+    "status": "passed_short_traces",
+    "dtype": "fp16",
+    "projection_fusion": true,
+    "prompt_count_per_case": 2,
+    "decode_steps_after_prefill": 4,
+    "compared_logit_positions_per_prompt": 5,
+    "tolerances": {
+      "atol": 0.125,
+      "rtol": 0.01
+    },
+    "quantization": {
+      "weight_dtype": "int4",
+      "activation_dtype": "fp16",
+      "source_group_size": 128,
+      "storage_group_size": 64,
+      "scheme": "symmetric_signed_to_unsigned_zero8"
+    },
+    "recorded_fingerprints_consistent_across_cases": true,
+    "acceptance": "FP16 dandan is compared with native FP16 cuBLAS. W4A16 is compared with FP16-rounded dequantized weights from the same packed state and FP32 matmul accumulation. Logits must satisfy the stated tolerance and independent short greedy traces must match.",
+    "cases": [
+      {
+        "candidate_prefill_backend": "cuda",
+        "status": "passed",
+        "raw_result_file": "benchmarks/results/stage22_dandan_validation_cuda_prefill.json",
+        "library_sha256_fp16": "3a12b877b6cb2f9b8c920c7a89d395a0e6db9f457fd466780c2ee7ddea33e6fe",
+        "library_sha256_quantized": "3a12b877b6cb2f9b8c920c7a89d395a0e6db9f457fd466780c2ee7ddea33e6fe",
+        "oracle_quantized_module_count": 112,
+        "fp16_dandan_vs_cublas": [
+          {
+            "prompt": "用一句话解释 KV Cache。",
+            "finite": true,
+            "max_abs_logit_error": 0.05859375,
+            "mean_abs_logit_error": 0.008240977302193642,
+            "relative_l2_logit_error": 0.001940225949510932,
+            "logits_close": true,
+            "teacher_forced_argmax_match": true,
+            "greedy_token_match": true
+          },
+          {
+            "prompt": "Explain continuous batching in one sentence.",
+            "finite": true,
+            "max_abs_logit_error": 0.04296875,
+            "mean_abs_logit_error": 0.00597041379660368,
+            "relative_l2_logit_error": 0.001603563316166401,
+            "logits_close": true,
+            "teacher_forced_argmax_match": true,
+            "greedy_token_match": true
+          }
+        ],
+        "w4a16_kernel_vs_same_weights_oracle": [
+          {
+            "prompt": "用一句话解释 KV Cache。",
+            "finite": true,
+            "max_abs_logit_error": 0.0625,
+            "mean_abs_logit_error": 0.008402747102081776,
+            "relative_l2_logit_error": 0.00203825905919075,
+            "logits_close": true,
+            "teacher_forced_argmax_match": true,
+            "greedy_token_match": true
+          },
+          {
+            "prompt": "Explain continuous batching in one sentence.",
+            "finite": true,
+            "max_abs_logit_error": 0.05859375,
+            "mean_abs_logit_error": 0.007435573730617762,
+            "relative_l2_logit_error": 0.002009101677685976,
+            "logits_close": true,
+            "teacher_forced_argmax_match": true,
+            "greedy_token_match": true
+          }
+        ],
+        "quantization_change_vs_original_fp16": [
+          {
+            "prompt": "用一句话解释 KV Cache。",
+            "finite": true,
+            "max_abs_logit_error": 9.322265625,
+            "mean_abs_logit_error": 1.3758196830749512,
+            "relative_l2_logit_error": 0.317549467086792,
+            "logits_close": false,
+            "teacher_forced_argmax_match": false
+          },
+          {
+            "prompt": "Explain continuous batching in one sentence.",
+            "finite": true,
+            "max_abs_logit_error": 9.7578125,
+            "mean_abs_logit_error": 1.2850157022476196,
+            "relative_l2_logit_error": 0.3401727080345154,
+            "logits_close": false,
+            "teacher_forced_argmax_match": true
+          }
+        ]
+      },
+      {
+        "candidate_prefill_backend": "dandan",
+        "status": "passed",
+        "raw_result_file": "benchmarks/results/stage22_dandan_validation_flash_prefill.json",
+        "library_sha256_fp16": "3a12b877b6cb2f9b8c920c7a89d395a0e6db9f457fd466780c2ee7ddea33e6fe",
+        "library_sha256_quantized": "3a12b877b6cb2f9b8c920c7a89d395a0e6db9f457fd466780c2ee7ddea33e6fe",
+        "oracle_quantized_module_count": 112,
+        "fp16_dandan_vs_cublas": [
+          {
+            "prompt": "用一句话解释 KV Cache。",
+            "finite": true,
+            "max_abs_logit_error": 0.046875,
+            "mean_abs_logit_error": 0.006287469528615475,
+            "relative_l2_logit_error": 0.0014877398498356342,
+            "logits_close": true,
+            "teacher_forced_argmax_match": true,
+            "greedy_token_match": true
+          },
+          {
+            "prompt": "Explain continuous batching in one sentence.",
+            "finite": true,
+            "max_abs_logit_error": 0.046875,
+            "mean_abs_logit_error": 0.006536874454468489,
+            "relative_l2_logit_error": 0.0017696275608614087,
+            "logits_close": true,
+            "teacher_forced_argmax_match": true,
+            "greedy_token_match": true
+          }
+        ],
+        "w4a16_kernel_vs_same_weights_oracle": [
+          {
+            "prompt": "用一句话解释 KV Cache。",
+            "finite": true,
+            "max_abs_logit_error": 0.06640625,
+            "mean_abs_logit_error": 0.008954199030995369,
+            "relative_l2_logit_error": 0.0021560336463153362,
+            "logits_close": true,
+            "teacher_forced_argmax_match": true,
+            "greedy_token_match": true
+          },
+          {
+            "prompt": "Explain continuous batching in one sentence.",
+            "finite": true,
+            "max_abs_logit_error": 0.0595703125,
+            "mean_abs_logit_error": 0.008022544905543327,
+            "relative_l2_logit_error": 0.0021603754721581936,
+            "logits_close": true,
+            "teacher_forced_argmax_match": true,
+            "greedy_token_match": true
+          }
+        ],
+        "quantization_change_vs_original_fp16": [
+          {
+            "prompt": "用一句话解释 KV Cache。",
+            "finite": true,
+            "max_abs_logit_error": 9.291015625,
+            "mean_abs_logit_error": 1.3749507665634155,
+            "relative_l2_logit_error": 0.3173377215862274,
+            "logits_close": false,
+            "teacher_forced_argmax_match": false
+          },
+          {
+            "prompt": "Explain continuous batching in one sentence.",
+            "finite": true,
+            "max_abs_logit_error": 9.75,
+            "mean_abs_logit_error": 1.2848612070083618,
+            "relative_l2_logit_error": 0.3401350677013397,
+            "logits_close": false,
+            "teacher_forced_argmax_match": true
+          }
+        ]
+      }
+    ],
+    "limitations": [
+      "Short traces on two prompts are not a model-quality or perplexity evaluation.",
+      "Quantization change versus original FP16 is reported separately and is not a kernel correctness acceptance check.",
+      "Greedy agreement with the original unquantized model is not required for W4A16.",
+      "Recorded fingerprints describe source and binary files on disk when reports were collected; no start/end fingerprints were recorded by these validation runs.",
+      "Complete concurrent request lifecycle and Graph correctness require separate tests."
+    ]
+  },
+  "performance_validation": {
+    "status": "contended_non_comparable",
+    "publish_speedup_claim": false,
+    "configuration": {
+      "dtype": "fp16",
+      "batch_size": 2,
+      "max_new_tokens_per_request": 32,
+      "ignore_eos": true,
+      "actual_output_tokens_per_repetition": 64,
+      "warmup": 2,
+      "repetitions": 5,
+      "projection_fusion": true,
+      "prefix_cache": "disabled"
+    },
+    "findings": [
+      "The dandan_ops file fingerprint changed between configurations: 3a12b877b6cb2f9b8c920c7a89d395a0e6db9f457fd466780c2ee7ddea33e6fe versus a299141cc9c4cd546f9dca112e9983063a910874733e5266aa31ae09e24fc9db.",
+      "Large latency variation appeared within repetitions, including 634 to 3461 ms in W4A16 eager runs.",
+      "nvidia-smi reported GPU utilization of 99 percent after this benchmark process exited. The source of the GPU workload was not identified; external contention is suspected.",
+      "Elapsed times and throughput from these raw runs must not be used to claim a backend speedup or regression.",
+      "Actual token counts were 64 in every repetition, and eager versus Graph output token digests matched in all configurations.",
+      "New benchmark code records file fingerprints at mode start/end and cross-mode equality. Those fields were added after the raw runs and are intentionally not backfilled."
+    ],
+    "runs": [
+      {
+        "raw_result_file": "benchmarks/results/stage22_batch_fp16_cublas.json",
+        "eager_graph_output_token_match": true,
+        "modes": {
+          "eager": {
+            "recorded_library_sha256": null,
+            "actual_output_tokens_each_repetition": [
+              64,
+              64,
+              64,
+              64,
+              64
+            ],
+            "repeat_output_token_match": true
+          },
+          "cuda_graph": {
+            "recorded_library_sha256": null,
+            "actual_output_tokens_each_repetition": [
+              64,
+              64,
+              64,
+              64,
+              64
+            ],
+            "repeat_output_token_match": true
+          }
+        }
+      },
+      {
+        "raw_result_file": "benchmarks/results/stage22_batch_fp16_dandan.json",
+        "eager_graph_output_token_match": true,
+        "modes": {
+          "eager": {
+            "recorded_library_sha256": "3a12b877b6cb2f9b8c920c7a89d395a0e6db9f457fd466780c2ee7ddea33e6fe",
+            "actual_output_tokens_each_repetition": [
+              64,
+              64,
+              64,
+              64,
+              64
+            ],
+            "repeat_output_token_match": true
+          },
+          "cuda_graph": {
+            "recorded_library_sha256": "3a12b877b6cb2f9b8c920c7a89d395a0e6db9f457fd466780c2ee7ddea33e6fe",
+            "actual_output_tokens_each_repetition": [
+              64,
+              64,
+              64,
+              64,
+              64
+            ],
+            "repeat_output_token_match": true
+          }
+        }
+      },
+      {
+        "raw_result_file": "benchmarks/results/stage22_batch_fp16_flash.json",
+        "eager_graph_output_token_match": true,
+        "modes": {
+          "eager": {
+            "recorded_library_sha256": "a299141cc9c4cd546f9dca112e9983063a910874733e5266aa31ae09e24fc9db",
+            "actual_output_tokens_each_repetition": [
+              64,
+              64,
+              64,
+              64,
+              64
+            ],
+            "repeat_output_token_match": true
+          },
+          "cuda_graph": {
+            "recorded_library_sha256": "a299141cc9c4cd546f9dca112e9983063a910874733e5266aa31ae09e24fc9db",
+            "actual_output_tokens_each_repetition": [
+              64,
+              64,
+              64,
+              64,
+              64
+            ],
+            "repeat_output_token_match": true
+          }
+        }
+      },
+      {
+        "raw_result_file": "benchmarks/results/stage22_batch_w4a16.json",
+        "eager_graph_output_token_match": true,
+        "modes": {
+          "eager": {
+            "recorded_library_sha256": "3a12b877b6cb2f9b8c920c7a89d395a0e6db9f457fd466780c2ee7ddea33e6fe",
+            "actual_output_tokens_each_repetition": [
+              64,
+              64,
+              64,
+              64,
+              64
+            ],
+            "repeat_output_token_match": true
+          },
+          "cuda_graph": {
+            "recorded_library_sha256": "3a12b877b6cb2f9b8c920c7a89d395a0e6db9f457fd466780c2ee7ddea33e6fe",
+            "actual_output_tokens_each_repetition": [
+              64,
+              64,
+              64,
+              64,
+              64
+            ],
+            "repeat_output_token_match": true
+          }
+        }
+      },
+      {
+        "raw_result_file": "benchmarks/results/stage22_batch_w4a16_flash.json",
+        "eager_graph_output_token_match": true,
+        "modes": {
+          "eager": {
+            "recorded_library_sha256": "a299141cc9c4cd546f9dca112e9983063a910874733e5266aa31ae09e24fc9db",
+            "actual_output_tokens_each_repetition": [
+              64,
+              64,
+              64,
+              64,
+              64
+            ],
+            "repeat_output_token_match": true
+          },
+          "cuda_graph": {
+            "recorded_library_sha256": "a299141cc9c4cd546f9dca112e9983063a910874733e5266aa31ae09e24fc9db",
+            "actual_output_tokens_each_repetition": [
+              64,
+              64,
+              64,
+              64,
+              64
+            ],
+            "repeat_output_token_match": true
+          }
+        }
+      }
+    ],
+    "next_measurement": "Repeat only with an otherwise idle GPU and a fixed dandan_ops source/binary snapshot. Keep the same prompts, token budget, dtype, fusion, prefix policy and sampling behavior. Compare dense GEMM and W4A16 with CUDA prefill first; compare Flash prefill separately."
+  }
+}

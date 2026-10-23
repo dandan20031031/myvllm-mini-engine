@@ -110,12 +110,14 @@ PyTorch fallback 仍保留，便于对拍和在不具备 CUDA 工具链的环境
 
 当前 INT4/FP8 reference 会反量化后执行普通 Linear，不能直接称为量化加速。NVFP4、MXFP8、FP8/INT8 KV Cache 尚未完成。
 
+阶段22新增可选 dandan W4A16：保留原对称INT4 group64/128结果，无损转换到库的存储格式，使用CUDA GEMV/Tensor Core。支持先融合投影再量化；默认仍是reference。实际速度与模型质量另行评估。
+
 ## 已完成的验证
 
-当前阶段 19 的 CUDA capture-safe 修改后，全量回归为：
+2026-10-23 阶段22后，全量回归为：
 
 ```text
-156 passed, 2 warnings
+201 passed, 2 warnings
 ```
 
 warning 是当前 Windows 工具链与 PyTorch CUDA runtime 的版本提示，以及 setuptools 的 MSVC 环境提示。
@@ -167,7 +169,7 @@ CUDA Graph 相对 eager 约 `2.50x`。这是当前项目 runtime 的真实 batch
 2. **Prefix Cache 还没有完全跳过 prompt 计算**：目前已经共享物理 block 和生命周期，但 next logits 复用路径仍需完善。
 3. **PagedAttention 仍有优化空间**：需要 vectorized load、block size sweep、split-KV/flash-decoding。
 4. **Linear 仍主要依赖 cuBLAS**：projection fusion 减少了矩阵乘次数，但还不是专用高性能 GEMM。
-5. **量化 GEMM 尚未进入 native 主路径**：INT4/FP8 目前主要是 reference dequant。
+5. **量化性能/质量仍需验收**：阶段22已接入可选 W4A16 CUDA kernel，FP8仍为reference。W4A16省权重存储不代表当前端到端更快。
 6. **Sampling 仍是 PyTorch reference**：尚未实现 CUDA greedy、top-k、top-p 融合采样。
 7. **服务层尚未完成**：没有 Windows HTTP/OpenAI/SSE 服务。
 8. **Graph benchmark 还需扩展**：当前已有真实 batch 路径，但还需要 batch=1/2/4/8、FP16、P50/P95、不同 block size 和 prefill/decode 分离统计。
@@ -175,7 +177,7 @@ CUDA Graph 相对 eager 约 `2.50x`。这是当前项目 runtime 的真实 batch
 
 ## 后续路线
 
-### 第一优先级：dandan_ops 正式接入
+### 阶段22：dandan_ops 后端接入
 
 `dandan_ops` 是独立开发的高性能算子库，当前已经包含：
 
@@ -185,18 +187,19 @@ CUDA Graph 相对 eager 约 `2.50x`。这是当前项目 runtime 的真实 batch
 - W4A16 `QuantizedLinear`；
 - CUDA Graph benchmark 和 Compute Sanitizer 验证记录。
 
-接入计划：
+本轮已经实现：
 
-1. 移除 MiniQwenEngine 中写死的本机 `file:///D:/...` 依赖；
-2. 通过可选依赖、环境变量或本地 editable install 发现 `dandan_ops`；
-3. 建立 `DandanLinear` adapter，保持 `nn.Linear` 权重 `[N,K]` 布局；
-4. 先接 Q/K/V/O、Gate/Up/Down 和 LM head 的 FP16 inference path；
-5. 先支持 `auto`，再分别验收 V8 HGEMM 和 V10 TMA；
-6. 加入 dandan_ops 与 torch/cuBLAS 的数值对拍、Graph replay 和端到端 benchmark；
-7. 再接入 `QuantizedLinear`，将 W4A16 从 reference 路径替换成真正的 Tensor Core path；
-8. 只有在独立仓库和公开安装方式稳定后，才把它作为公开项目推荐后端。
+1. 可选安装和契约v2检查，无本机路径依赖；
+2. `DandanLinear` 保持 `[N,K]` 权重，`dandan`调用库auto、`dandan_cuda`强制HGEMM，融合投影保留所选后端；
+3. 对称INT4 group64/128无损转换为unsigned int32 packing、zero8、存储group64，并接入W4A16 CUDA GEMV/Tensor Core；支持先融合再量化；
+4. `--prefill-backend dandan` 直接使用FP16 D128 GQA Flash，不展开KV heads；decode继续使用引擎分页kernel；
+5. 库缺失、dtype/device/能力不支持提前报错，记录库源码、二进制和profile指纹；
+6. 完整0.6B短序列数值对拍、真实Graph logits/KV回归；修复padding slots共用写入页；
+7. benchmark支持固定实际token数、禁用Prefix、分开记录量化/backend，增加独立数值验收脚本。
 
-### 第二优先级：PagedAttention
+当前FP16/cuBLAS基线保留默认。完整模型验证不等于长序列质量评估；本轮性能运行期间外部库改变且GPU有其他负载，数据仅作运行检查，不用于宣称加速。下一步先在固定库版本和独占GPU条件下补公平性能验收，再按实测瓶颈调整。
+
+### 下一优先级：PagedAttention
 
 - vectorized KV load；
 - block size `16/32/64/128/256` sweep；
@@ -214,7 +217,7 @@ CUDA Graph 相对 eager 约 `2.50x`。这是当前项目 runtime 的真实 batch
 
 ### 第四优先级：精度和高级解码
 
-- INT4/FP8 Tensor Core GEMM；
+- W4A16形状路由及质量评估、FP8 Tensor Core GEMM；
 - FP8/INT8 KV Cache；
 - NVFP4/MXFP8 能力验证和 Windows backend；
 - 投机解码：greedy 多 token 验证、KV 回退、prompt lookup、小 draft model、随机采样校正。

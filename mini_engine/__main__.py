@@ -20,17 +20,18 @@ def main():
     parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--num-blocks", type=int, default=256)
     parser.add_argument("--block-size", type=int, default=16)
-    parser.add_argument("--prefill-backend", choices=["auto", "flash", "math", "cuda"], default="auto")
+    parser.add_argument("--prefill-backend", choices=["auto", "flash", "math", "cuda", "dandan"], default="auto")
     parser.add_argument("--decode-backend", choices=["torch", "cuda"], default="torch")
     parser.add_argument("--elementwise-backend", choices=["torch", "cuda"], default="torch")
     parser.add_argument("--data-backend", choices=["torch", "cuda"], default="torch")
-    parser.add_argument("--linear-backend", choices=["torch", "cuda"], default="torch")
+    parser.add_argument("--linear-backend", choices=["torch", "cuda", "dandan", "dandan_cuda"], default="torch")
     parser.add_argument("--fuse-projections", action="store_true",
                         help="fuse QKV and Gate/Up projections into concatenated matmuls")
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--thinking", action="store_true")
     parser.add_argument("--quantization", choices=["none", "int8", "int4", "fp8", "fp8_e4m3", "fp8_e5m2", "mxfp8", "nvfp4"], default="none")
     parser.add_argument("--quant-group-size", type=int, default=128)
+    parser.add_argument("--quant-backend", choices=["reference", "dandan"], default="reference")
     args = parser.parse_args()
     dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[args.dtype]
     runner = NativeQwen3Runner.from_pretrained(
@@ -41,6 +42,7 @@ def main():
         num_blocks=args.num_blocks, block_size=args.block_size,
         enable_thinking=args.thinking, local_files_only=args.local_files_only,
         fuse_projections=args.fuse_projections,
+        quant_backend=args.quant_backend,
         quantization=None if args.quantization == "none" else QuantConfig(
             args.quantization, activation_dtype=args.dtype, group_size=args.quant_group_size),
     )
@@ -71,6 +73,7 @@ def main():
         result = runner.generate_incremental(args.prompt, args.max_new_tokens)
         payload = asdict(result)
         payload["quantization"] = runner.model.quantization_report
+        payload["backends"] = runner.model.backend_report()
         print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 

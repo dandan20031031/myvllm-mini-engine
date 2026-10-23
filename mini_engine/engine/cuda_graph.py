@@ -32,13 +32,23 @@ class DecodeGraphBucket:
         self.positions = torch.zeros(batch_size, dtype=torch.long, device=self.device)
         self.block_tables = torch.full((batch_size, max_blocks), -1, dtype=torch.long, device=self.device)
         self.padding_block_ids = None
+        self.padding_block_tables = None
         if padding_block_ids is not None:
-            padding = torch.as_tensor(padding_block_ids, dtype=torch.long, device=self.device).flatten()
-            if padding.numel() < max_blocks:
-                raise ValueError("padding_block_ids must cover max_blocks")
-            self.padding_block_ids = padding[:max_blocks].contiguous()
+            self.set_padding(padding_block_ids)
         self.graph: torch.cuda.CUDAGraph | None = None
         self.logits: torch.Tensor | None = None
+
+    def set_padding(self, padding_block_ids):
+        padding = torch.as_tensor(padding_block_ids, dtype=torch.long, device=self.device).flatten()
+        if padding.numel() < max(self.shape.max_blocks, self.shape.batch_size):
+            raise ValueError("padding_block_ids must cover max_blocks and one private page per batch slot")
+        if torch.unique(padding[:self.shape.batch_size]).numel() != self.shape.batch_size:
+            raise ValueError("padding slots require distinct scratch pages")
+        self.padding_block_ids = padding.contiguous()
+        self.padding_block_tables = padding[:self.shape.max_blocks].repeat(self.shape.batch_size, 1)
+        # Padding always decodes position zero. Only column zero is accessed;
+        # give each slot a private write target, including during capture.
+        self.padding_block_tables[:, 0] = padding[:self.shape.batch_size]
 
     @property
     def captured(self) -> bool:
@@ -51,7 +61,7 @@ class DecodeGraphBucket:
             raise ValueError("padded replay requires scratch padding_block_ids")
         self.input_ids[active_count:].zero_()
         self.positions[active_count:].zero_()
-        self.block_tables[active_count:] = self.padding_block_ids
+        self.block_tables[active_count:] = self.padding_block_tables[active_count:]
 
     @torch.inference_mode()
     def capture(self, *, warmup: int = 3) -> None:
@@ -63,7 +73,7 @@ class DecodeGraphBucket:
             # Capture itself performs model writes. Without scratch pages it
             # could overwrite a live request's KV page before the first replay.
             raise ValueError("provide reserved padding_block_ids before capture")
-        self.block_tables.copy_(self.padding_block_ids.view(1, -1).expand(self.shape.batch_size, -1))
+        self.block_tables.copy_(self.padding_block_tables)
         self.input_ids.zero_()
         self.positions.zero_()
         for _ in range(warmup):
@@ -127,9 +137,7 @@ class DecodeGraphManager:
             )
             self.buckets[key] = bucket
         elif padding_block_ids is not None and bucket.padding_block_ids is None:
-            bucket.padding_block_ids = torch.as_tensor(
-                padding_block_ids, dtype=torch.long, device=self.cache.device
-            )[: shape.max_blocks].contiguous()
+            bucket.set_padding(padding_block_ids)
         return bucket
 
     def capture(self, batch_size: int, max_blocks: int, *, padding_block_ids=None, warmup: int = 3):

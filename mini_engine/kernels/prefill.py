@@ -12,12 +12,18 @@ def prefill_attention(q, k, v, backend="auto"):
     a PyTorch build without Flash support fails instead of reporting false use.
     math is useful for reproducible correctness comparisons.
     """
-    if backend not in {"auto", "flash", "math", "cuda"}:
-        raise ValueError("prefill backend must be auto, flash, math or cuda")
+    if backend not in {"auto", "flash", "math", "cuda", "dandan"}:
+        raise ValueError("unknown prefill backend")
     if backend == "flash" and (q.device.type != "cuda" or not torch.backends.cuda.is_flash_attention_available()):
         raise RuntimeError("This PyTorch build has no CUDA Flash Attention backend; select auto or math")
     if q.ndim != 4 or k.ndim != 4 or k.shape != v.shape or q.shape[1] % k.shape[1]:
         raise ValueError("prefill expects [batch, heads, tokens, dim] and divisible GQA heads")
+    if backend == "dandan":
+        from .dandan_backend import validate_dandan_runtime, require_dandan_capability
+        validate_dandan_runtime(q.device, q.dtype)
+        ops = require_dandan_capability("prefill")
+        # Keep native GQA heads: expansion would waste memory and bandwidth.
+        return ops.flash_attention(q, k, v, causal=True, query_start=0, backend="cuda")
     groups = q.shape[1] // k.shape[1]
     # Explicit GQA expansion also works with PyTorch builds without enable_gqa.
     k = k.repeat_interleave(groups, dim=1)
