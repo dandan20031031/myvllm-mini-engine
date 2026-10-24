@@ -5,18 +5,17 @@
 ## 调用链与代码入口
 
 ```text
-CLI / Chat / HTTP / benchmark
-             |
-NativeQwen3Runner / HTTP单GPU worker
-             |
-NativeBatchRuntime -> Scheduler -> GenerationRequest
-       |                 |
-  PrefixCache       BlockManager
-       |                 |
-NativeQwen3 -------- KVCachePool
-       |
-CUDA kernels / cuBLAS / optional dandan_ops
+CLI / Chat -> NativeQwen3Runner.generate_incremental -> NativeQwen3 / DecodeGraphBucket
+HTTP -> InferenceService单GPU worker -> NativeBatchRuntime.step -> Scheduler
+                                       |                         |
+                                 NativeQwen3                GenerationRequest
+                                       |                         |
+                                  KVCachePool <--------- BlockManager / PrefixCache
+                                       |
+                        CUDA kernels / cuBLAS / optional dandan_ops
 ```
+
+两条生成路径共享模型、KV与算子实现，但CLI/Chat直接执行单请求循环，HTTP/batch经调度runtime执行；不能把示意图理解为所有入口已收敛到同一个执行循环。`engine/llm_engine.py`保留早期facade/reference接口，并非当前原生Chat和服务的必经热路径。
 
 | 入口 | 职责 |
 |---|---|
@@ -92,3 +91,36 @@ W4 bridge不重新量化：将signed nibble映射到unsigned、zero=8，打包�
 默认推理请求上限32、每请求结果队列32、HTTP连接线程64、body 1MiB、messages 128项、socket超时5秒、请求超时120秒、max_tokens上限512，均受配置及上下文/KV约束。Graph开启后还受bucket并发和上下文覆盖范围约束。
 
 断线、慢消费者和超时触发worker取消并回收页；慢SSE不会阻塞GPU worker。输入错误只终止对应请求，无法归因的batch执行异常终止整个active batch；不可恢复GPU错误可能需重启。关闭时释放active/waiting、Prefix pin和Graph scratch引用，正在执行的CUDA kernel须返回后才能完成退出。
+
+## 与vLLM、SGLang的框架及源码对照
+
+2026-10-25按项目范围调整：两者只作结构与代码设计参考，性能对照保留给MiniVLLM。以下是源码阅读结论，不是安装、移植、运行或速度验证；不比较代码行数，也不将同名功能视为同等覆盖。
+
+为避免main漂移，固定所读版本：vLLM [`5f63ea46`](https://github.com/vllm-project/vllm/commit/5f63ea461ccd567ece6f50dd3701430c0f321039)，SGLang [`773cb938`](https://github.com/sgl-project/sglang/commit/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed)。本地依据为阶段29提交`66dc76d`；后续源码变更需重新核对路径与配置分支。
+
+### 先看职责分工
+
+vLLM V1把请求处理、EngineCore调度、Executor/Worker和ModelRunner分层；Executor也有单进程实现，不应理解为只能多卡。SGLang Python SRT围绕TokenizerManager、Scheduler、ScheduleBatch/ForwardBatch、ModelRunner组织工作，normal/overlap是不同执行模式。进程与通信设计服务于更大的模型、设备和部署范围；我们的单GPU worker保持同进程，先借鉴接口边界。[vLLM架构说明](https://docs.vllm.ai/en/latest/design/arch_overview/)、[SGLang服务入口](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/entrypoints/engine.py#L892)
+
+| 对照点 | vLLM所读实现 | SGLang所读实现 | 本项目当前实现与取舍 |
+|---|---|---|---|
+| 请求执行 | [`EngineCore.step/step_with_batch_queue`](https://github.com/vllm-project/vllm/blob/5f63ea461ccd567ece6f50dd3701430c0f321039/vllm/v1/engine/core.py#L657) 经Executor执行，支持非阻塞调用与在途批次 | [`Scheduler.event_loop_normal/overlap`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/managers/scheduler.py#L1995) 管接收、选批、执行与结果处理 | [`InferenceService._run`](../mini_engine/server.py) 同步推进runtime；HTTP线程与GPU worker已经分开，但没有CPU调度与GPU批次执行的完整overlap |
+| 调度模型 | [`Scheduler.schedule`](https://github.com/vllm-project/vllm/blob/5f63ea461ccd567ece6f50dd3701430c0f321039/vllm/v1/core/sched/scheduler.py#L677) 以已计算token与目标token进度统一分配工作，并处理抢占/恢复 | [`PrefillAdder`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/managers/schedule_policy.py#L584) 管输入/chunk/KV等预算，ScheduleBatch支持内存检查与retract | [`Scheduler.schedule`](../mini_engine/engine/scheduler.py) 显式区分decode与prefill，虚拟预留最坏输出增长；设计简单、准入保守，无安全preemption/recompute |
+| 执行批次 | [`GPUModelRunner._prepare_inputs`](https://github.com/vllm-project/vllm/blob/5f63ea461ccd567ece6f50dd3701430c0f321039/vllm/v1/worker/gpu_model_runner.py#L1924) 构造扁平token/query与持久batch metadata | [`ScheduleBatch`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/managers/schedule_batch.py) 准备extend/decode，再转换为执行用ForwardBatch | [`NativeBatchRuntime`](../mini_engine/engine/runtime.py) decode真正成批，prefill chunks仍逐请求执行；需要补执行批次接口后才能做真正ragged prefill |
+| KV与Prefix索引 | [`KVCacheManager`](https://github.com/vllm-project/vllm/blob/5f63ea461ccd567ece6f50dd3701430c0f321039/vllm/v1/core/kv_cache_manager.py#L264) 用block hash和coordinator管理命中、分配与cache groups | [`RadixCache.match_prefix`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/mem_cache/radix_cache.py#L364) 用树段与锁引用管理共享前缀；[`ReqToTokenPool`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/mem_cache/memory_pool.py#L375) 分离请求地址与KV存储 | [`BlockManager`](../mini_engine/cache/block_manager.py) 管页所有权；[`PrefixCache`](../mini_engine/cache/prefix_cache.py) 用完整token tuple、线性最长前缀扫描与LRU。完整命中已实际跳过，不等于hash APC或RadixAttention实现 |
+| Graph策略 | [`CudagraphDispatcher`](https://github.com/vllm-project/vllm/blob/5f63ea461ccd567ece6f50dd3701430c0f321039/vllm/v1/cudagraph_dispatcher.py#L233) 按FULL/PIECEWISE/NONE、token数和uniform decode等条件选择模式 | [`DecodeCudaGraphRunner`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py#L844) 管eligibility、load_batch与执行；[`FullCudaGraphBackend`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/model_executor/runner_backend/full_cuda_graph_backend.py#L99) 管capture/replay | [`DecodeGraphBucket`](../mini_engine/engine/cuda_graph.py) 只覆盖一token decode，按batch和块表宽度分桶；固定metadata和独立scratch，支持greedy capture；prefill不在图中 |
+| 采样与后端契约 | [`Sampler`](https://github.com/vllm-project/vllm/blob/5f63ea461ccd567ece6f50dd3701430c0f321039/vllm/v1/sample/sampler.py#L129) 配合SamplingMetadata、独立采样接口及拒绝采样模块 | [`ModelRunner.init_attention_backends`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/model_executor/model_runner.py#L1096) 与attention registry分离prefill/decode后端能力 | [`sampling.py`](../mini_engine/sampling.py) 的CUDA路径仅argmax；[`dandan_backend.py`](../mini_engine/kernels/dandan_backend.py) 显式校验dtype/设备/contract，量化另有bridge。后端可选不等于所有精度/布局/Graph组合均支持 |
+
+路径随版本变化：该vLLM提交同时存在经典`worker/gpu_model_runner.py`与新`worker/gpu/model_runner.py`分支，新Graph描述还涉及query长度与microbatch，不能把两条runner串成同一调用链。该SGLang提交的Graph代码已拆到`model_executor/runner/`及`runner_backend/`，不继续引用旧版`model_executor/cuda_graph_runner.py`。[vLLM新Graph模块](https://github.com/vllm-project/vllm/blob/5f63ea461ccd567ece6f50dd3701430c0f321039/vllm/v1/worker/gpu/cudagraph_utils.py#L71)
+
+一个值得解释的具体差异：在所读vLLM默认APC分支中，`get_computed_blocks()`将可命中长度限制在末token之前，以重新计算输出logits；我们给完整block边界缓存`next_logits`，在精确边界命中时可直接采样。它有额外logits存储成本，只适用于当前单模型/固定权重与对应缓存语义，不能据此宣称优于所有APC方案。[vLLM对应分支](https://github.com/vllm-project/vllm/blob/5f63ea461ccd567ece6f50dd3701430c0f321039/vllm/v1/core/kv_cache_manager.py#L264)
+
+### 从源码对照得到的开发取舍
+
+1. **先清晰执行接口**：Chat与batch可继续有不同入口，但逐步共享输入准备、模型执行、采样及清理边界，减少两套循环的行为漂移。把调度决策与GPU执行metadata分开，不为此引入多进程Executor。
+2. **再做真正batched/ragged prefill**：调度输出明确每请求的query范围、绝对位置与KV页；配套attention和模型对拍。把多请求放进队列或把prompt切块，本身不算完成混合执行批次。
+3. **补强后端契约**：明确dense/paged、dtype/head_dim、suffix offset、Graph eligibility和workspace约束。`dandan_ops`仍独立演进，引擎在版本升级后重新验收，Graph不得沿用旧权重/路由捕获。
+4. **按证据决定索引与异步复杂度**：Prefix扫描成为CPU热点后再选block hash或radix；CPU/GPU overlap需要in-flight批次、取消、过期结果、buffer及KV最后使用时刻的协议，不能只把`.cpu()`改成non_blocking就算完成。
+5. **继续控制范围**：保留单卡dense、Windows原生和可解释的资源所有权；多GPU、PD分离、主机层级缓存及多模态保持后置。现有continuous batching、Prefix和Graph已形成闭环，适用范围与工业框架仍有明确差异。
+
+上述顺序是基于当前代码的工程判断，尚未实现新的执行器、Radix索引或overlap scheduler。性能验收继续做项目内部消融与MiniVLLM同口径对照，不要求安装vLLM/SGLang；源码阅读也不引入Linux、WSL或Triton运行依赖。

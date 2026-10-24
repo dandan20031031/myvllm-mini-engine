@@ -84,7 +84,7 @@ HTTP指标保留以下定义：
 
 `--backend-manifest` 的comparison至少包含checkpoint/tokenizer固定revision或hash、chat_template_sha256、dtype/quantization、kv_cache_dtype、max_model_len、kv_cache_bytes和prefix_cache_policy；驱动/CUDA等影响条件也应补入。`implementation`记录具体引擎、启动参数及构建指纹。
 
-`--compare`检查model、负载hash、sampling、OS/GPU声明、comparison manifest、逐请求实际token数及输出文本hash；有失败、缺usage/原始记录或条件不一致即拒绝倍率。通过检查仅说明声明相符，`remote_conditions_independently_verified=false`仍保留。当前没有vLLM/SGLang同条件实测、完整任务质量集或长期服务压测结果。
+`--compare`检查model、负载hash、sampling、OS/GPU声明、comparison manifest、逐请求实际token数及输出文本hash；有失败、缺usage/原始记录或条件不一致即拒绝倍率。通过检查仅说明声明相符，`remote_conditions_independently_verified=false`仍保留。2026-10-25起性能交付对象收敛为MiniVLLM和项目内部消融；vLLM/SGLang改为架构与源码对照，不再要求采集它们的性能结果。完整任务质量集与长期服务压测仍待完成。
 
 ## Chat完整decode Graph与单请求配对测量（2026-10-24）
 

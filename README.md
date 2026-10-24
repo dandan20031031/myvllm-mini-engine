@@ -305,7 +305,7 @@ median TPOT: 约 20–21 ms/token
 .\.venv\Scripts\python benchmarks\benchmark_http.py --base-url http://127.0.0.1:8000/v1 --model qwen3-0.6b --concurrency 4 --repetitions 3
 ```
 
-HTTP工具也可对已有vLLM/SGLang兼容服务采集数据，记录实际usage、TTFT、TPOT估计、P50/P95、失败和吞吐；stream chunk不当作token。`--compare LEFT_JSON RIGHT_JSON`在环境manifest、实际输出或负载条件不一致时拒绝计算速度比。尚未采集vLLM/SGLang同条件结果；DeepInfer当前目标模型不同，不能直接参与Qwen3排名。
+HTTP工具记录实际usage、TTFT、TPOT估计、P50/P95、失败和吞吐；stream chunk不当作token。`--compare LEFT_JSON RIGHT_JSON`在环境manifest、实际输出或负载条件不一致时拒绝计算速度比。项目性能对照聚焦MiniVLLM；vLLM/SGLang只比较框架结构与源码设计，见[架构报告](reports/ARCHITECTURE.md)。HTTP工具仍可连接兼容服务，不要求安装工业引擎。
 
 ### 性能分析
 
@@ -342,7 +342,7 @@ PROJECT_STATUS.md   当前项目总览、已实现能力和后续方向
 - HTTP/SSE为本地greedy接口子集；尚无多机服务、安全网关和结构化输出；
 - 投机仅greedy prompt lookup；小draft、EAGLE/MTP/DFlash、随机接受概率校正尚未实现；
 - `dandan_ops` 为可选独立算子库；默认仍使用项目 CUDA/cuBLAS backend；
-- 尚未完成与 vLLM、SGLang、TensorRT-LLM 的完全同口径端到端对比。
+- MiniVLLM的同条件性能对照与完整量化质量集尚待完成；vLLM/SGLang仅作架构与源码对照，不承担性能跑分交付。
 
 ## 许可证
 

@@ -1,6 +1,6 @@
 # MiniQwenEngine 项目总览
 
-更新：2026-10-24。面向实习展示的 Windows 11 单卡 Qwen3-0.6B 推理引擎；Transformer权重加载与tokenizer使用HuggingFace，native forward、KV管理、调度与CUDA算子由项目实现。
+更新：2026-10-25。面向实习展示的 Windows 11 单卡 Qwen3-0.6B 推理引擎；Transformer权重加载与tokenizer使用HuggingFace，native forward、KV管理、调度与CUDA算子由项目实现。
 
 ## 已实现能力
 
@@ -43,6 +43,8 @@ CUDA kernels / cuBLAS / optional dandan_ops
 
 技术报告按主题整理，入口见 [技术报告目录](reports/README.md)：[推理引擎架构与实现](reports/ARCHITECTURE.md)、[系统验证与性能评测](reports/VALIDATION_AND_BENCHMARKS.md)、[算子后端性能复核](reports/BACKEND_PERFORMANCE_RECHECK.md)和[推理引擎性能分析指南](reports/PROFILING.md)；原始JSON实验摘要保留。
 
+2026-10-25已补vLLM/SGLang固定commit的架构与源码对照：请求执行、调度进度、执行批次、KV/Prefix、Graph和后端契约，结论并入架构报告。性能对照收敛为MiniVLLM；下一步重点是共享执行接口、真正ragged prefill与后端能力边界，尚未因此实现新的异步/多进程执行器。
+
 ## 验证与性能证据
 
 设备：RTX5080 SM120，PyTorch2.9.1+cu128。项目CUDA使用Toolkit13.3；独立算子库此前用12.8构建。两者均须通过目标机回归，不能因为版本提示而忽略运行测试。
@@ -67,5 +69,5 @@ CUDA kernels / cuBLAS / optional dandan_ops
 3. **NVFP4/MXFP8**：尚无项目可用计算后端，保留reserved，不能用INT4冒充FP4。
 4. **更完整投机**：小draft、随机接受/校正分布、batch/Graph调度、EAGLE-3/DFlash训练型draft；现有接受率策略不是DeepInfer置信度实现。
 5. **服务生产能力**：目前greedy聊天子集，无tools/多模态/安全网关；服务执行错误可中止整个active batch。异步调度、preemption、随机CUDA采样尚待完成。
-6. **行业公平跑分与质量集**：HTTP工具已经可用，尚无本项目与vLLM/SGLang同条件实测；DeepInfer目标模型不同，不纳入Qwen3速度排名。
+6. **MiniVLLM性能与质量集**：补同机、同精度、同负载的MiniVLLM对照和固定质量集；vLLM/SGLang只做架构、模块边界和源码机制对照，取消性能跑分交付。HTTP工具保留为通用能力，DeepInfer不纳入Qwen3速度排名。
 7. **工具验证**：新kernel尚未做compute-sanitizer memcheck/racecheck；数值/Graph测试不能替代。

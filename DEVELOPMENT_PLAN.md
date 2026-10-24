@@ -10,12 +10,14 @@
 
 | 对照 | 可借鉴的机制 | 当前项目的缺口与落地范围 |
 |---|---|---|
-| [vLLM APC](https://docs.vllm.ai/en/latest/features/automatic_prefix_caching/) | 复用前缀KV，避免重复prefill | 现有共享物理页仍重算prompt；实现真正跳过、边界logits、LRU与活跃引用隔离 |
+| [vLLM APC](https://docs.vllm.ai/en/latest/features/automatic_prefix_caching/) | 复用前缀KV，避免重复prefill | 本项目已完成完整block命中跳过、边界logits、LRU与活跃引用隔离；对照block hash索引与当前tuple扫描的设计取舍 |
 | [SGLang](https://arxiv.org/abs/2312.07104) | 前缀复用和请求调度协同 | 先复用已有完整block索引；不为小项目重写完整Radix树或声称已实现RadixAttention |
 | [SGLang speculative](https://docs.sglang.io/docs/advanced_features/speculative_decoding) | NGRAM、多种draft、动态验证预算 | 无需训练的prompt lookup适配0.6B；真正多token验证与KV回退优先 |
 | [DeepInfer](https://github.com/deepseek-ai/DeepInfer) | 异步调度、batch invariant、确定性采样、confidence调度 | 借鉴调度/验收设计；DP/CP、MoE EP/EPLB及DeepSeek专用MTP不适合本项目单卡dense模型 |
 
-DeepInfer当前开源目标模型为DeepSeek-V4.1-Flash，官方说明是offline inference，不能当作本机Qwen3公平跑分对象。vLLM/SGLang的外部对照允许另行采集，但必须记录OS、版本、模型、dtype、实际token和计时边界；不把不同系统/模型结果拼成同条件排名。
+2026-10-25范围调整：vLLM、SGLang只做框架结构和源码设计对照，记录所读commit、模块职责、请求调用链、调度/KV/执行接口及本项目的取舍；取消两者性能跑分作为交付项。MiniVLLM保留同机、同精度、同负载的性能对照，Transformers用于正确性参考。HTTP采集工具保留为通用能力，服务稳定性在本项目独立验收。
+
+DeepInfer保留为异步调度、确定性与投机机制的阅读参考，不纳入Qwen3速度排名；多GPU、MoE与PD分离继续后置。源码对照不代表实现了对方所有能力，不以文件数量或代码行数评价优劣；结论与方法更新至`reports/ARCHITECTURE.md`。
 
 ### 论文与实验选择
 
@@ -37,11 +39,11 @@ DeepInfer当前开源目标模型为DeepSeek-V4.1-Flash，官方说明是offline
 | 24 | Prompt lookup greedy投机、KV回退、EOS/预算、固定/接受率自适应draft | 已实现；两条真实prompt逐token对拍通过。重复文本观察1.79x，普通问答无明显收益 |
 | 25（承接14） | Windows HTTP chat completions子集/SSE、单GPU worker continuous batching、断线取消、有界队列 | 已实现；真实0.6B并发JSON/SSE通过，退出后KV引用为0 |
 | 26（承接20） | D128 PagedAttention向量化、保留baseline、5种block size；恢复launch检查、CUDA greedy、构建hash隔离 | 已实现；FP16/BF16/Graph对拍通过，15组配对算子实验观察1.74–1.80x |
-| 27（承接15/19/22） | HTTP公平计量/条件校验、模型集成验收和可提交实验摘要 | 工具与本机验收已完成；外部vLLM/SGLang实测、完整质量集和独占GPU性能采集仍待执行 |
+| 27（承接15/19/22） | HTTP公平计量/条件校验、模型集成验收和可提交实验摘要 | 工具与本机验收已完成；MiniVLLM同口径实测、完整质量集和受控性能采集仍待执行；vLLM/SGLang改为源码结构对照 |
 | 28 | 真实引擎PyTorch Profiler/NVTX入口、CPU与GPU热点、Graph对照 | PyTorch eager/Graph采集与2项恢复/异常测试通过；Nsight已安装，但本执行环境CLI未生成report，硬件counter待采集 |
 | 29 | CLI Chat完整decode Graph、固定pinned/GPU metadata、图内greedy、同runner交替配对TTFT/TPOT/P50/P95 | 功能完成；FP16/BF16跨页/多轮/异常回收与batch缩容对拍，全量356 tests通过；真实模型结果见主题验收报告 |
 
-阶段29后优先级：先完成batch=1/2/4/8/16、短/长prompt的同条件MiniVLLM/外部引擎对照与服务并发稳定性验证，再选择直接paged多query/ragged prefill或低精度KV中的一条深化。PD分离、多GPU与训练型draft继续后置；单卡0.6B先用profiling证明收益再扩大架构。
+阶段29后优先级：先完成vLLM/SGLang架构与源码对照，明确本项目应复用的接口边界；性能只推进batch=1/2/4/8/16、短/长prompt的同条件MiniVLLM对照及本项目服务稳定性，再选择直接paged多query/ragged prefill或低精度KV中的一条深化。PD分离、多GPU与训练型draft继续后置；单卡0.6B先用profiling证明收益再扩大架构。
 
 本轮完成可独立验收的23–27。旧计划的FP8 GEMM、INT8/FP8 KV、NVFP4/MXFP8、训练型draft仍是后续研究工作，不因本轮结束自动标记完成。它们分别需要独立kernel、模型质量验收以及Windows硬件/工具链证据；保留在阶段16/17/21中继续推进，不提供伪实现。已有W4A16不重复开发。
 
@@ -146,7 +148,7 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 | 12 | Windows CUDA prefill correctness-first backend | 完成；尚不等同 FlashAttention 性能 |
 | 13 | 显式 CUDA Linear/cuBLAS 边界、完整 Qwen3 验收和本地 Chat | 部分完成；INT4/FP8/NVFP4/MXFP8 高性能 GEMM 待做 |
 | 14 | Windows HTTP/OpenAI/SSE 服务 | greedy聊天子集在25完成 |
-| 15 | Transformers、具体 MiniVLLM、vLLM/SGLang/TensorRT-LLM 正式对比 | 待实现 |
+| 15 | Transformers正确性参考、具体MiniVLLM性能；vLLM/SGLang框架结构与源码对照 | MiniVLLM同口径性能待采集；不再要求工业引擎跑分 |
 | 16 | 精度感知 KV、FP8/INT8 KV、NVFP4/MXFP8 | 待实现 |
 | 17 | 投机解码 | greedy prompt lookup/回退/接受率预算在24完成；小draft、随机校正和batch投机待做 |
 | 18 | Projection Fusion：QKV、Gate/Up 合并矩阵乘，减少 decode GEMM/launch | 完成首轮；单请求和 batch Graph 已验证，继续优化 |
@@ -155,7 +157,7 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 | 21 | 高性能量化：INT4/FP8 Tensor Core GEMM、FP8/INT8 KV、NVFP4/MXFP8 探索 | INT4 CUDA接入已在22完成；其余待实现，性能/质量继续评估 |
 | 22 | 可选 dandan_ops：FP16 Linear、W4A16 bridge、GQA Flash prefill、融合/Graph验证和同口径 benchmark | 功能/数值验收完成；后续系统验收及公平性能复核见[系统验证与性能评测](reports/VALIDATION_AND_BENCHMARKS.md) |
 
-后续可按实测瓶颈调整算子顺序，并更新本文件。vLLM 不作为 Windows 引擎运行依赖；若比较环境使用不同 OS，必须披露差异，不能宣称严格同环境。
+后续可按实测瓶颈调整算子顺序，并更新本文件。vLLM/SGLang不作为Windows引擎运行依赖，源码阅读不要求安装它们；MiniVLLM跑分仍须记录硬件/OS/软件版本、实际dtype、输入输出与计时边界。
 
 ## 6. 正确性与性能验收
 
@@ -195,7 +197,7 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 | 12 | Windows Prefill CUDA，在线 softmax/causal/GQA | 完成 correctness-first backend |
 | 13 | Linear/LM head 与 INT8/INT4/FP8 GEMM | 完成显式 CUDA Linear/cuBLAS 边界；量化 GEMM 待做 |
 | 14 | Windows API、SSE、本地 RAG/代码助手（后置可选） | 待实现 |
-| 15 | 完整 Qwen3 benchmark，与 Transformers、具体 MiniVLLM、vLLM/SGLang/TensorRT-LLM 对比 |
+| 15 | 完整Qwen3验收、MiniVLLM性能对照；vLLM/SGLang只读架构和源码对照 |
 | 16 | 精度感知 KV、FP8/INT8 KV、NVFP4/MXFP8 能力 |
 | 17 | 投机解码：greedy 多 token 验证、KV 回退、confidence-scheduled draft length、随机采样校正 |
 | 18 | Projection Fusion：QKV、Gate/Up 合并 GEMM，先优化瘦 GEMM 的 launch 和权重读取 |
@@ -209,7 +211,7 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 
 2026-10-23 调整：18/19 首轮完成后，先执行阶段22接入现成的 dandan_ops，不要求引擎等待算子库最终优化。三种正式路径为 BF16 CUDA/cuBLAS 基线、FP16 dandan 可选后端、INT4+FP16 W4A16。保持默认后端不变；显式后端缺失能力/不兼容配置要提前报错。记录库源码、二进制及路由 profile 指纹；每次升级重新验证 logits/KV/Graph 和端到端性能。
 
-2026-10-24更新：阶段23–26已补实际Prefix跳过、chunked prefill、greedy投机、HTTP/SSE、D128向量化和CUDA greedy；27提供真实模型验收和外部HTTP比较工具。接下来做直接paged多query验证、ragged batched prefill、低精度KV/FP8 GEMM与受控行业采集。下面18/19顺序保留为历史背景。
+2026-10-25更新：阶段23–29已补实际Prefix跳过、chunked prefill、greedy投机、HTTP/SSE、D128向量化、CUDA greedy和Chat Graph；27提供真实模型验收与通用HTTP工具。行业框架只做架构/源码对照，性能聚焦MiniVLLM和项目内部消融；后续直接paged多query、ragged batched prefill、低精度KV/FP8 GEMM按瓶颈选择。下面18/19顺序保留为历史背景。
 
 MiniVLLM 的 RTX 5080 profiler 显示，eager decode 的主要问题是 CPU kernel launch 空洞，GPU 时间主要集中在小 batch GEMM；其 PagedAttention 只占较小比例。因此优化顺序固定为：
 

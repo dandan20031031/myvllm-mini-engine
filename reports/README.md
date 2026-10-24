@@ -6,7 +6,7 @@
 
 | 报告 | 保留内容 |
 |---|---|
-| [推理引擎架构与实现](ARCHITECTURE.md) | 模型调用链、KV所有权、Prefix/chunk调度、Graph、CUDA/量化后端、投机与HTTP服务 |
+| [推理引擎架构与实现](ARCHITECTURE.md) | 模型调用链、KV所有权、Prefix/chunk调度、Graph、CUDA/量化后端、投机与HTTP服务；2026-10-25补vLLM/SGLang固定commit源码对照 |
 | [系统验证与性能评测](VALIDATION_AND_BENCHMARKS.md) | 已执行验收、关键实验条件与结果、计时定义、复现入口和未完成项 |
 | [算子后端性能复核](BACKEND_PERFORMANCE_RECHECK.md) | 2026-10-24 FP16/W4A16原始观察、基线漂移、显存与输出差异 |
 | [推理引擎性能分析指南](PROFILING.md) | 真实eager/Graph热点、PyTorch/NVTX/Nsight命令与采集限制 |
