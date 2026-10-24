@@ -290,6 +290,16 @@ median TPOT: 约 20–21 ms/token
 
 HTTP工具也可对已有vLLM/SGLang兼容服务采集数据，记录实际usage、TTFT、TPOT估计、P50/P95、失败和吞吐；stream chunk不当作token。`--compare LEFT_JSON RIGHT_JSON`在环境manifest、实际输出或负载条件不一致时拒绝计算速度比。尚未采集vLLM/SGLang同条件结果；DeepInfer当前目标模型不同，不能直接参与Qwen3排名。
 
+### 性能分析
+
+```powershell
+. .\scripts\enter_project.ps1
+.\.venv\Scripts\python benchmarks\profile_native_batch.py --dtype fp16 --output-dir build/profiles/eager
+.\.venv\Scripts\python benchmarks\profile_native_batch.py --dtype fp16 --cuda-graph --output-dir build/profiles/graph
+```
+
+输出算子表、Chrome trace与摘要，分析CPU调度、launch、H2D/D2H及GPU kernel。真实模型eager/Graph trace已采集成功；profiling时间包含插桩开销。详细判读与Nsight命令见[性能分析指南](reports/STAGE_28_PROFILING.md)，算子库最新测试的适用边界见[性能复核](reports/BACKEND_PERFORMANCE_RECHECK.md)。
+
 ## 项目结构
 
 ```text

@@ -1,0 +1,140 @@
+{
+  "date": "2026-10-24",
+  "scope": "Profiling only: timings include instrumentation overhead. Physical kernel sums can overlap across streams.",
+  "nsys_report_generated": false,
+  "nsys_status": "No reports were generated in this execution environment.",
+  "cases": [
+    {
+      "mode": "fp16_eager",
+      "model": "Qwen3-0.6B",
+      "gpu": "NVIDIA GeForce RTX 5080",
+      "dtype": "fp16",
+      "batch_size": 1,
+      "prompt_tokens": 128,
+      "output_tokens": 8,
+      "profiled_wall_ms_not_benchmark": 240.04909999985102,
+      "output_matches_warmup": true,
+      "physical_kernel_total_us": 24639.477999999996,
+      "top_physical_kernels": [
+        {
+          "name": "_ZN8internal5gemvx6kernelIii6__halfS2_S2_fLb0ELb1ELb1ELb0ELi6ELb0E18cublasGemvParamsExIi30cublasGemvTensorStridedBatchedIKS2_ES6_S4_IS2_EfEEENSt9enable_ifIXntT5_EvE4typeET11_",
+          "total_us": 11132.487999999992
+        },
+        {
+          "name": "_ZN51_GLOBAL__N__707c1c75_18_paged_attention_cu_2a02079d19attention_vector128IN3c104HalfEEEvPKT_S5_S5_PKxS7_PS3_PfS9_iiiiii",
+          "total_us": 4600.505999999996
+        },
+        {
+          "name": "_ZN43_GLOBAL__N__6c3de7ca_10_prefill_cu_3e12ee7321causal_prefill_kernelIN3c104HalfEEEvPKT_S5_S5_PS3_xxxxxxx",
+          "total_us": 2734.451
+        },
+        {
+          "name": "_ZN47_GLOBAL__N__66b24481_14_elementwise_cu_124a6b2e11norm_kernelIN3c104HalfELb0EEEvPKT_S5_S5_PS3_S6_xf",
+          "total_us": 1238.2140000000063
+        },
+        {
+          "name": "_ZN7cutlass7Kernel2I64cutlass_80_tensorop_f16_s16816gemm_relu_f16_64x64_32x6_tn_align8EEvNT_6ParamsE",
+          "total_us": 598.98
+        }
+      ],
+      "top_cpu": [
+        {
+          "name": "engine/decode",
+          "calls": 8,
+          "self_cpu_us": 39663.100000001024
+        },
+        {
+          "name": "cudaLaunchKernel",
+          "calls": 3552,
+          "self_cpu_us": 35263.50000000039
+        },
+        {
+          "name": "op/linear",
+          "calls": 904,
+          "self_cpu_us": 27856.500000000342
+        },
+        {
+          "name": "op/rms_norm",
+          "calls": 680,
+          "self_cpu_us": 19966.49999999917
+        },
+        {
+          "name": "aten::mm",
+          "calls": 904,
+          "self_cpu_us": 16291.300000000107
+        },
+        {
+          "name": "engine/prefill",
+          "calls": 8,
+          "self_cpu_us": 8948.000000000095
+        }
+      ]
+    },
+    {
+      "mode": "fp16_graph",
+      "model": "Qwen3-0.6B",
+      "gpu": "NVIDIA GeForce RTX 5080",
+      "dtype": "fp16",
+      "batch_size": 1,
+      "prompt_tokens": 128,
+      "output_tokens": 8,
+      "profiled_wall_ms_not_benchmark": 77.45009999962349,
+      "output_matches_warmup": true,
+      "physical_kernel_total_us": 24001.737999999994,
+      "top_physical_kernels": [
+        {
+          "name": "_ZN8internal5gemvx6kernelIii6__halfS2_S2_fLb0ELb1ELb1ELb0ELi6ELb0E18cublasGemvParamsExIi30cublasGemvTensorStridedBatchedIKS2_ES6_S4_IS2_EfEEENSt9enable_ifIXntT5_EvE4typeET11_",
+          "total_us": 11086.240000000002
+        },
+        {
+          "name": "_ZN51_GLOBAL__N__707c1c75_18_paged_attention_cu_2a02079d19attention_vector128IN3c104HalfEEEvPKT_S5_S5_PKxS7_PS3_PfS9_iiiiii",
+          "total_us": 4254.39
+        },
+        {
+          "name": "_ZN43_GLOBAL__N__6c3de7ca_10_prefill_cu_3e12ee7321causal_prefill_kernelIN3c104HalfEEEvPKT_S5_S5_PS3_xxxxxxx",
+          "total_us": 2736.3969999999995
+        },
+        {
+          "name": "_ZN47_GLOBAL__N__66b24481_14_elementwise_cu_124a6b2e11norm_kernelIN3c104HalfELb0EEEvPKT_S5_S5_PS3_S6_xf",
+          "total_us": 1140.9709999999936
+        },
+        {
+          "name": "_ZN7cutlass7Kernel2I64cutlass_80_tensorop_f16_s16816gemm_relu_f16_64x64_32x6_tn_align8EEvNT_6ParamsE",
+          "total_us": 598.4690000000002
+        }
+      ],
+      "top_cpu": [
+        {
+          "name": "cudaMemcpyAsync",
+          "calls": 121,
+          "self_cpu_us": 19350.599999999988
+        },
+        {
+          "name": "engine/prefill",
+          "calls": 8,
+          "self_cpu_us": 10311.000000000007
+        },
+        {
+          "name": "cudaLaunchKernel",
+          "calls": 682,
+          "self_cpu_us": 6475.299999999914
+        },
+        {
+          "name": "op/linear",
+          "calls": 113,
+          "self_cpu_us": 4134.099999999972
+        },
+        {
+          "name": "cudaStreamSynchronize",
+          "calls": 86,
+          "self_cpu_us": 3652.000000000045
+        },
+        {
+          "name": "op/rms_norm",
+          "calls": 85,
+          "self_cpu_us": 3306.500000000068
+        }
+      ]
+    }
+  ]
+}

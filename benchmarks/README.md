@@ -9,6 +9,7 @@
 | `benchmark_speculative.py` | 普通greedy/投机输出一致性、接受率和单请求耗时 |
 | `benchmark_http.py` | 标准库HTTP/SSE负载，可对兼容服务采集usage、TTFT/P95与吞吐；`--compare`拒绝不匹配条件 |
 | `validate_system_extensions.py` | 完整模型chunk/prefix/Graph与可选真实HTTP验证，仅正确性不测速 |
+| `profile_native_batch.py` | 已预热真实runtime的PyTorch Profiler/NVTX，CPU范围、GPU kernel、Chrome trace；采集时间不是benchmark |
 
 客户端usage缺失时，不以SSE chunk数代替token数。跨引擎数据需附相同模型/精度/硬件/工作负载manifest；本仓库尚无vLLM/SGLang同条件实测结果。
 

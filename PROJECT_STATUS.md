@@ -16,6 +16,7 @@
 | 投机 | 无额外模型的greedy prompt lookup、并行验证、接受/拒绝、KV回退、接受率自适应draft预算 |
 | 接口 | CLI、多轮Chat、Windows HTTP chat completions子集/SSE；单GPU worker调度，有界输入/输出队列和断线取消 |
 | 实验 | kernel配对sweep、真实batch eager/Graph、投机对拍、完整模型系统验收、兼容服务HTTP负载与比较条件检查 |
+| Profiling | PyTorch CPU/CUDA trace、NVTX阶段范围、eager/Graph对照；Nsight命令与当前采集限制见阶段28报告 |
 
 ## 代码调用链
 
@@ -55,6 +56,8 @@ CUDA kernels / cuBLAS / optional dandan_ops
 - 历史3请求BF16 batch：eager189.3、Graph473.9、fusion+Graph519.2 tokens/s。只作历史参考，不能与本轮不同精度/负载/计时直接拼比。
 
 原始结果在 `benchmarks/results/`，不提交模型或机器相关大文件；报告保存紧凑摘要。GPU未严格独占的数据不作为工业引擎排名证据。
+
+2026-10-24新增性能复核发现同一cuBLAS基线首末轮404→725 TPS，尚不足以给出dandan FP16端到端加速比。W4A16本轮Graph分配显存峰值1054.64MiB，对应FP16为1614.39MiB；具体条件和输出差异见`reports/BACKEND_PERFORMANCE_RECHECK.md`。阶段28已采集真实FP16 eager/Graph CPU+CUDA trace，另有2项profiling恢复/异常测试通过。
 
 ## 仍需完成
 

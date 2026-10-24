@@ -38,6 +38,7 @@ DeepInfer当前开源目标模型为DeepSeek-V4.1-Flash，官方说明是offline
 | 25（承接14） | Windows HTTP chat completions子集/SSE、单GPU worker continuous batching、断线取消、有界队列 | 已实现；真实0.6B并发JSON/SSE通过，退出后KV引用为0 |
 | 26（承接20） | D128 PagedAttention向量化、保留baseline、5种block size；恢复launch检查、CUDA greedy、构建hash隔离 | 已实现；FP16/BF16/Graph对拍通过，15组配对算子实验观察1.74–1.80x |
 | 27（承接15/19/22） | HTTP公平计量/条件校验、模型集成验收和可提交实验摘要 | 工具与本机验收已完成；外部vLLM/SGLang实测、完整质量集和独占GPU性能采集仍待执行 |
+| 28 | 真实引擎PyTorch Profiler/NVTX入口、CPU与GPU热点、Graph对照 | PyTorch eager/Graph采集与2项恢复/异常测试通过；Nsight已安装，但本执行环境CLI未生成report，硬件counter待采集 |
 
 本轮完成可独立验收的23–27。旧计划的FP8 GEMM、INT8/FP8 KV、NVFP4/MXFP8、训练型draft仍是后续研究工作，不因本轮结束自动标记完成。它们分别需要独立kernel、模型质量验收以及Windows硬件/工具链证据；保留在阶段16/17/21中继续推进，不提供伪实现。已有W4A16不重复开发。
 
