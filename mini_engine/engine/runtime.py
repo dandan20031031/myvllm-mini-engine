@@ -88,34 +88,30 @@ class NativeBatchRuntime:
         if not requests:
             return {}
         device = self.cache.device
-        tokens = torch.tensor(
-            [request.output_token_ids[-1] for request in requests], device=device, dtype=torch.long
-        )
-        positions = torch.tensor(
-            [request.total_len - 1 for request in requests], device=device, dtype=torch.long
-        )
+        token_ids = [request.output_token_ids[-1] for request in requests]
+        offsets = [request.total_len - 1 for request in requests]
         width = max(len(request.block_ids) for request in requests)
-        tables = torch.full((len(requests), width), -1, device=device, dtype=torch.long)
-        for row, request in enumerate(requests):
-            tables[row, : len(request.block_ids)] = torch.tensor(request.block_ids, device=device)
         if self.graph_manager is None:
+            tokens = torch.tensor(token_ids, device=device, dtype=torch.long)
+            positions = torch.tensor(offsets, device=device, dtype=torch.long)
+            tables = torch.full((len(requests), width), -1, device=device, dtype=torch.long)
+            for row, request in enumerate(requests):
+                tables[row, : len(request.block_ids)] = torch.tensor(request.block_ids, device=device)
             logits = self.model.forward_decode_batch(tokens, self.cache, tables, positions)
+            chosen = self._sample(logits, requests).cpu().tolist()
         else:
             padding = self.graph_padding_block_ids
             if padding is None:
                 raise RuntimeError("graph replay requires reserved graph_padding_block_ids")
             bucket = self.graph_manager.get(
-                len(requests), tables.shape[1], padding_block_ids=padding
+                len(requests), width, padding_block_ids=padding
             )
             if not bucket.captured:
                 bucket.capture()
-            padded = torch.full(
-                (len(requests), bucket.shape.max_blocks), -1,
-                device=device, dtype=torch.long,
-            )
-            padded[:, :tables.shape[1]] = tables
-            logits = bucket.replay(tokens, positions, padded, active_count=len(requests))
-        chosen = self._sample(logits, requests).cpu().tolist()
+            greedy_in_graph = bucket.capture_sampling and all(request.temperature == 0 for request in requests)
+            output = bucket.replay_metadata(token_ids, offsets, [request.block_ids for request in requests],
+                                            sample=greedy_in_graph)
+            chosen = (output if greedy_in_graph else self._sample(output, requests)).cpu().tolist()
         result = {}
         for row, request in enumerate(requests):
             token_id = int(chosen[row])

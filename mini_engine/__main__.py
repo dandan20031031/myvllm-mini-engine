@@ -15,6 +15,7 @@ def main():
     parser.add_argument("--model", default="Qwen/Qwen3-0.6B")
     parser.add_argument("--prompt")
     parser.add_argument("--chat", action="store_true", help="start an interactive multi-turn chat")
+    parser.add_argument("--cuda-graph", action="store_true", help="capture decode and greedy sampling; requires CUDA decode/data backends")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dtype", choices=["bf16", "fp16", "fp32"], default="bf16")
     parser.add_argument("--max-new-tokens", type=int, default=128)
@@ -37,6 +38,10 @@ def main():
     parser.add_argument("--max-draft-tokens", type=int, default=4)
     parser.add_argument("--adaptive-draft", action="store_true")
     args = parser.parse_args()
+    if args.cuda_graph and args.speculative != "none":
+        parser.error("--cuda-graph and --speculative cannot be combined yet")
+    if not args.chat and args.prompt is None:
+        parser.error("--prompt is required unless --chat is used")
     dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[args.dtype]
     runner = NativeQwen3Runner.from_pretrained(
         args.model, device=args.device, dtype=dtype, prefill_backend=args.prefill_backend, decode_backend=args.decode_backend,
@@ -51,43 +56,46 @@ def main():
         quantization=None if args.quantization == "none" else QuantConfig(
             args.quantization, activation_dtype=args.dtype, group_size=args.quant_group_size),
     )
-    if args.chat:
-        messages = []
-        print("MiniQwenEngine chat; type /exit to quit, /clear to reset.")
-        while True:
-            try:
-                user_text = input("you> ")
-            except (EOFError, KeyboardInterrupt):
-                print()
-                break
-            if user_text.strip() == "/exit":
-                break
-            if user_text.strip() == "/clear":
-                messages = []
-                print("conversation cleared")
-                continue
-            if not user_text.strip():
-                continue
-            messages.append({"role": "user", "content": user_text})
-            if args.speculative == "prompt_lookup":
-                result = runner.generate_speculative(messages=messages, max_new_tokens=args.max_new_tokens,
-                    max_draft_tokens=args.max_draft_tokens, adaptive_draft=args.adaptive_draft).text
-            else:
-                result = runner.chat(messages, args.max_new_tokens)
-            messages.append({"role": "assistant", "content": result})
-            print(f"assistant> {result}")
-    else:
-        if args.prompt is None:
-            parser.error("--prompt is required unless --chat is used")
-        if args.speculative == "prompt_lookup":
-            result = runner.generate_speculative(args.prompt, args.max_new_tokens,
-                max_draft_tokens=args.max_draft_tokens, adaptive_draft=args.adaptive_draft)
+    try:
+        if args.chat:
+            messages = []
+            print("MiniQwenEngine chat; type /exit to quit, /clear to reset.")
+            while True:
+                try:
+                    user_text = input("you> ")
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+                if user_text.strip() == "/exit":
+                    break
+                if user_text.strip() == "/clear":
+                    messages = []
+                    print("conversation cleared")
+                    continue
+                if not user_text.strip():
+                    continue
+                messages.append({"role": "user", "content": user_text})
+                if args.speculative == "prompt_lookup":
+                    result = runner.generate_speculative(messages=messages, max_new_tokens=args.max_new_tokens,
+                        max_draft_tokens=args.max_draft_tokens, adaptive_draft=args.adaptive_draft).text
+                else:
+                    result = runner.chat(messages, args.max_new_tokens, use_cuda_graph=args.cuda_graph)
+                messages.append({"role": "assistant", "content": result})
+                print(f"assistant> {result}")
         else:
-            result = runner.generate_incremental(args.prompt, args.max_new_tokens)
-        payload = asdict(result)
-        payload["quantization"] = runner.model.quantization_report
-        payload["backends"] = runner.model.backend_report()
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+            if args.prompt is None:
+                parser.error("--prompt is required unless --chat is used")
+            if args.speculative == "prompt_lookup":
+                result = runner.generate_speculative(args.prompt, args.max_new_tokens,
+                    max_draft_tokens=args.max_draft_tokens, adaptive_draft=args.adaptive_draft)
+            else:
+                result = runner.generate_incremental(args.prompt, args.max_new_tokens, use_cuda_graph=args.cuda_graph)
+            payload = asdict(result)
+            payload["quantization"] = runner.model.quantization_report
+            payload["backends"] = runner.model.backend_report()
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+    finally:
+        runner.close()
 
 
 if __name__ == "__main__":

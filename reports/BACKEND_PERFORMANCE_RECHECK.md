@@ -1,4 +1,6 @@
-# 算子库接入后的性能复核：2026-10-24
+# 算子后端性能复核
+
+记录日期：2026-10-24。
 
 本轮新测，不复用阶段22受并发负载与依赖变动影响的数据。设备RTX5080、Qwen3-0.6B、FP16、fusion、3请求、每请求20 prompt token与64实际输出token、prefix关闭、warmup2、重复7次；每种配置分别测eager和真实Graph。计时包括prefill、decode、调度和采样，不包括加载和tokenizer；下表是聚合TPS和PyTorch分配显存峰值。
 
@@ -29,4 +31,4 @@ dandan Linear+自有prefill的64-token eager/Graph输出digest不同，各模式
   --warmup 2 --repetitions 7 --local-files-only --output benchmarks/results/backend_recheck.json
 ```
 
-分别更换prefill/linear/quantization参数，并在测试后重跑同一基线。下一次正式比较应在同进程准备独立模型/runtime/Graph后交替测量A/B，采集GPU状态并保留逐次输出；先用阶段28 profiling定位CPU launch、metadata与GPU kernel热点，避免依据不稳定的总耗时更改后端默认值。
+分别更换prefill/linear/quantization参数，并在测试后重跑同一基线。下一次正式比较应在同进程准备独立模型/runtime/Graph后交替测量A/B，采集GPU状态并保留逐次输出；先用[推理引擎性能分析指南](PROFILING.md)定位CPU launch、metadata与GPU kernel热点，避免依据不稳定的总耗时更改后端默认值。

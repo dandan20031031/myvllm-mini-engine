@@ -69,6 +69,7 @@ def instrument_runtime(runtime, *, nvtx=False, record=True, layers=False):
         if runtime.graph_manager is not None:
             for bucket in runtime.graph_manager.buckets.values():
                 patch(bucket, "replay", "engine/graph_buffers_and_replay")
+                patch(bucket, "replay_metadata", "engine/graph_buffers_and_replay")
         for function in ("embedding_lookup", "rms_norm", "residual_rms_norm", "residual_add",
                          "silu_and_mul", "apply_rope_backend", "write_kv_cache_batch",
                          "prefill_attention", "paged_attention"):

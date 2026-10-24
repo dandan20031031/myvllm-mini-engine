@@ -2,7 +2,7 @@
 
 MiniQwenEngine 是一个面向 Qwen3-0.6B 的 Windows 11 单 GPU 推理引擎，使用 PyTorch 加载模型，并通过项目自有 CUDA 扩展实现 Paged KV Cache、PagedAttention、数据移动和 elementwise 算子。
 
-当前实现和后续方向见 [PROJECT_STATUS.md](PROJECT_STATUS.md)。项目仍处于研究和性能优化阶段，单算子 benchmark 不等同于 vLLM 的端到端性能结论。
+当前实现和后续方向见 [PROJECT_STATUS.md](PROJECT_STATUS.md)，架构与实验依据见 [技术报告目录](reports/README.md)。项目仍处于研究和性能优化阶段，单算子 benchmark 不等同于 vLLM 的端到端性能结论。
 
 ## 已实现功能
 
@@ -117,7 +117,9 @@ Chat 中支持：
 /exit   退出
 ```
 
-### 启用 Projection Fusion
+### CUDA Graph 与 Projection Fusion
+
+单轮推理和Chat命令均可加`--cuda-graph --sampling-backend cuda`，将decode和greedy采样捕获进CUDA Graph。要求`--decode-backend cuda --data-backend cuda`，FP16/BF16均可。首次使用某个bucket会有capture预热，后续轮次复用；`/clear`清空历史，退出自动释放Graph scratch。当前不能与`--speculative`同时使用。
 
 ```powershell
 .\.venv\Scripts\python -m mini_engine `
@@ -232,7 +234,22 @@ $env:MINI_ENGINE_TEST_CUDA = "1"
 
 block16/32/64/128/256的15组测试均通过对拍。未独占GPU，这是本机算子观察值，不是服务加速或超越工业引擎的结论。复现：`python benchmarks/benchmark_paged_sweep.py`。
 
-### 单请求 Qwen3-0.6B
+### 单请求 Chat CUDA Graph
+
+RTX5080、FP16、融合投影、CUDA greedy、cuBLAS Linear，同一runner交替配对，两条prompt分别固定输出64/128 token、各6对，无profiler：
+
+| 指标 | eager | CUDA Graph |
+|---|---:|---:|
+| TPOT P50 | 15.58–16.94 ms | 2.53–2.66 ms |
+| 总生成吞吐 | 57.7–62.8 tokens/s | 342.1–357.5 tokens/s |
+
+四组吞吐观察比5.65–6.05x，输出全部一致；TTFT未见一致改善。首次capture单列，测量期无capture且源码/后端指纹一致。TPOT分位数按请求统计；总TPS排除加载、tokenization和文本decode。GPU未严格独占，不代表行业排名或HTTP服务性能。[条件与原始数据摘要](reports/VALIDATION_AND_BENCHMARKS.md)。
+
+```powershell
+.\.venv\Scripts\python benchmarks\benchmark_chat_graph.py --model "D:\models\Qwen3-0.6B" --max-new-tokens 64 --max-new-tokens 128 --ignore-eos --warmup 2 --repetitions 6
+```
+
+### 历史单请求 Qwen3-0.6B
 
 ```powershell
 .\.venv\Scripts\python benchmarks\benchmark_native_qwen3.py `
@@ -298,7 +315,7 @@ HTTP工具也可对已有vLLM/SGLang兼容服务采集数据，记录实际usage
 .\.venv\Scripts\python benchmarks\profile_native_batch.py --dtype fp16 --cuda-graph --output-dir build/profiles/graph
 ```
 
-输出算子表、Chrome trace与摘要，分析CPU调度、launch、H2D/D2H及GPU kernel。真实模型eager/Graph trace已采集成功；profiling时间包含插桩开销。详细判读与Nsight命令见[性能分析指南](reports/STAGE_28_PROFILING.md)，算子库最新测试的适用边界见[性能复核](reports/BACKEND_PERFORMANCE_RECHECK.md)。
+输出算子表、Chrome trace与摘要，分析CPU调度、launch、H2D/D2H及GPU kernel。真实模型eager/Graph trace已采集成功；profiling时间包含插桩开销。详细判读与Nsight命令见[推理引擎性能分析指南](reports/PROFILING.md)，算子库最新测试的适用边界见[算子后端性能复核](reports/BACKEND_PERFORMANCE_RECHECK.md)。
 
 ## 项目结构
 
@@ -312,7 +329,7 @@ mini_engine/
 
 benchmarks/         单算子、单请求和 batch benchmark
 tests/              CPU、CUDA、模型对齐和 runtime 回归
-reports/            详细技术报告和实验记录
+reports/            主题技术报告和实验摘要，入口README.md
 PROJECT_STATUS.md   当前项目总览、已实现能力和后续方向
 ```
 

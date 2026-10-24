@@ -1,4 +1,6 @@
-# 阶段28：Windows真实引擎Profiling
+# 推理引擎性能分析指南
+
+记录日期：2026-10-24（原阶段28）。实测摘要见 [stage28_profile_summary.json](stage28_profile_summary.json)，常规性能结论见 [系统验证与性能评测](VALIDATION_AND_BENCHMARKS.md)。
 
 ## 入口与数据
 
@@ -70,7 +72,7 @@ Set-Location -LiteralPath 'D:\dandan123\dandan\myvllm'
 
 ## Nsight Systems与Nsight Compute
 
-本机已安装Nsight Systems2026.1.3及Nsight Compute2026.2.1。当前自动化执行环境下，Nsight Systems CLI没有生成report：最初沙箱拒绝启动，允许沙箱外运行后仍返回`No reports were generated`，未输出可解释的target日志；绝对路径和底层Python重试未解决。因此下面命令是本机PowerShell的采集配置，**尚未在本执行环境成功验收**。先使用已经跑通的PyTorch trace，不把失败采集写成成功。
+原验收记录中已安装Nsight Systems2026.1.3及Nsight Compute2026.2.1，但Systems CLI返回`No reports were generated`，未成功生成report。因此下面命令是待验证的PowerShell采集配置，**尚未在原执行环境成功验收**；当前已有可用的PyTorch trace。
 
 ```powershell
 nsys profile --trace=cuda,nvtx,cublas --sample=none --cpuctxsw=none `

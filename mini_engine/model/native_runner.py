@@ -12,7 +12,7 @@ from .qwen3 import IncrementalGenerationResult
 
 class NativeQwen3Runner:
     def __init__(self, model, tokenizer, *, num_blocks=256, block_size=16, enable_thinking=False, eos_token_ids=None,
-                 sampling_backend="torch"):
+                 sampling_backend="torch", use_cuda_graph=False):
         self.model = model.eval()
         self.tokenizer = tokenizer
         self.enable_thinking = enable_thinking
@@ -24,11 +24,17 @@ class NativeQwen3Runner:
         if sampling_backend not in {"torch", "cuda"}:
             raise ValueError("sampling backend must be torch or cuda")
         self.sampling_backend = sampling_backend
+        self.use_cuda_graph = bool(use_cuda_graph)
+        self.chat_graph_manager = None
+        self._chat_graph_padding = None
+        self._chat_graph_capture_count = 0
+        self._chat_graph_capture_ms = 0.0
 
     @classmethod
     def from_pretrained(cls, path, *, device="cuda", dtype=torch.bfloat16, prefill_backend="auto", decode_backend="torch", elementwise_backend="torch", data_backend="torch", linear_backend="torch",
                         num_blocks=256, block_size=16, enable_thinking=False, local_files_only=False,
-                        quantization=None, fuse_projections=False, quant_backend="reference", sampling_backend="torch"):
+                        quantization=None, fuse_projections=False, quant_backend="reference", sampling_backend="torch",
+                        use_cuda_graph=False):
         from ..runtime import configure_local_cache
         configure_local_cache()
         if sampling_backend not in {"torch", "cuda"}:
@@ -100,18 +106,77 @@ class NativeQwen3Runner:
         if quantization is not None:
             native.quantize(quantization, backend=quant_backend)
         return cls(native, tokenizer, num_blocks=num_blocks, block_size=block_size,
-                   enable_thinking=enable_thinking, eos_token_ids=stop_ids, sampling_backend=sampling_backend)
+                   enable_thinking=enable_thinking, eos_token_ids=stop_ids, sampling_backend=sampling_backend,
+                   use_cuda_graph=use_cuda_graph)
+
+    def _validate_chat_graph(self, temperature):
+        if self.cache.device.type != "cuda":
+            raise ValueError("CUDA Graph requires a CUDA device")
+        if self.model.decode_backend != "cuda" or self.model.data_backend != "cuda":
+            raise ValueError("CUDA Graph requires decode_backend='cuda' and data_backend='cuda'")
+        if temperature != 0:
+            raise ValueError("single-request CUDA Graph currently supports greedy sampling only")
+
+    def _chat_bucket(self, width):
+        from ..engine import DecodeGraphManager
+
+        if self.chat_graph_manager is None:
+            # One private page suffices: every capture/padding slot uses
+            # position zero. It remains owned until close(), separate from
+            # every live prompt, even when another bucket is captured later.
+            self._chat_graph_padding = self.block_manager.allocate(
+                "__chat_graph_padding__", self.block_manager.block_size)
+            sizes = [1]
+            while sizes[-1] < self.block_manager.num_blocks:
+                sizes.append(min(sizes[-1] * 2, self.block_manager.num_blocks))
+            self.chat_graph_manager = DecodeGraphManager(
+                self.model, self.cache, batch_sizes=(1,), block_buckets=sizes,
+                capture_sampling=True, sampling_backend=self.sampling_backend)
+        bucket = self.chat_graph_manager.get(1, width, padding_block_ids=self._chat_graph_padding)
+        if not bucket.captured:
+            started = time.perf_counter()
+            bucket.capture()
+            self._sync()
+            self._chat_graph_capture_ms = (time.perf_counter() - started) * 1000
+            self._chat_graph_capture_count += 1
+        return bucket
+
+    def chat_graph_status(self):
+        manager = self.chat_graph_manager
+        return {
+            "capture_count": self._chat_graph_capture_count,
+            "last_capture_ms": self._chat_graph_capture_ms,
+            "captured_buckets": [] if manager is None else [
+                {"batch_size": shape.batch_size, "max_blocks": shape.max_blocks}
+                for shape, bucket in manager.buckets.items() if bucket.captured],
+            "scratch_pages": len(self._chat_graph_padding or []),
+            "sampling_captured": manager is not None and manager.capture_sampling,
+        }
+
+    def close(self):
+        """Release chat graph buffers and its private scratch page; idempotent."""
+        if self._busy:
+            raise RuntimeError("cannot close an active native runner")
+        if self.chat_graph_manager is not None:
+            self._sync()
+            self.chat_graph_manager = None
+        self.block_manager.release("__chat_graph_padding__")
+        self._chat_graph_padding = None
 
     def _sync(self):
         if self.cache.device.type == "cuda":
             torch.cuda.synchronize(self.cache.device)
 
     @torch.inference_mode()
-    def generate_incremental(self, prompt=None, max_new_tokens=128, *, temperature=0.0, top_k=0, top_p=1.0, messages=None):
+    def generate_incremental(self, prompt=None, max_new_tokens=128, *, temperature=0.0, top_k=0, top_p=1.0,
+                             messages=None, use_cuda_graph=None):
         if max_new_tokens <= 0:
             raise ValueError("max_new_tokens must be positive")
         if self._busy:
             raise RuntimeError("native runner currently supports one active request")
+        graph_enabled = self.use_cuda_graph if use_cuda_graph is None else bool(use_cuda_graph)
+        if graph_enabled:
+            self._validate_chat_graph(temperature)
         if messages is None:
             if prompt is None:
                 raise ValueError("prompt or messages is required")
@@ -123,7 +188,8 @@ class NativeQwen3Runner:
         required = ids.numel() + max_new_tokens - 1
         if required > self.model.config.max_position_embeddings:
             raise ValueError("prompt and output budget exceed context limit")
-        if not self.block_manager.can_allocate(required):
+        scratch_needed = int(graph_enabled and max_new_tokens > 1 and self._chat_graph_padding is None)
+        if self.block_manager.blocks_required(required) + scratch_needed > self.block_manager.free_blocks:
             raise MemoryError("prompt and output budget exceed KV cache capacity")
         eos = self.eos_token_ids
         if eos is None:
@@ -132,18 +198,21 @@ class NativeQwen3Runner:
         self._busy = True
         generated, first = [], None
         try:
-            # Reserve only the prompt now. The complete budget was checked above,
-            # so growing a single active request cannot deadlock midway.
-            blocks = self.block_manager.allocate("single", ids.numel())
+            # A single request already checks its entire budget. Reserving it
+            # once also keeps its table stable across all decode page boundaries.
+            blocks = self.block_manager.allocate("single", required)
             self._sync()
             start = time.perf_counter()
             logits = self.model(ids, self.cache, blocks)[-1:]
             position = ids.numel()
             reason = "length"
+            bucket, next_token = None, None
             for index in range(max_new_tokens):
-                token = sample_next_token(logits, temperature, top_k, top_p, backend=self.sampling_backend)
+                token = (next_token if next_token is not None else
+                         sample_next_token(logits, temperature, top_k, top_p, backend=self.sampling_backend))
                 token_id = int(token.item())
-                self._sync()
+                # item() already waits for this token. A device-wide sync here
+                # redundantly stalls unrelated work on every emitted token.
                 emitted = time.perf_counter()
                 if first is None:
                     first = emitted
@@ -153,8 +222,12 @@ class NativeQwen3Runner:
                     break
                 if index + 1 == max_new_tokens:
                     break
-                blocks = self.block_manager.grow("single", position + 1)
-                logits = self.model(token, self.cache, blocks, position=position)
+                if graph_enabled:
+                    if bucket is None:
+                        bucket = self._chat_bucket(len(blocks))
+                    next_token = bucket.replay_metadata([token_id], [position], [blocks], sample=True)
+                else:
+                    logits = self.model(token, self.cache, blocks, position=position)
                 position += 1
             end = emitted
             return IncrementalGenerationResult(
@@ -200,10 +273,11 @@ class NativeQwen3Runner:
                 self.model, self.cache,
                 batch_sizes=graph_batch_sizes,
                 block_buckets=graph_block_buckets,
+                capture_sampling=True, sampling_backend=self.sampling_backend,
             )
         if graph_manager is not None and graph_padding_block_ids is None:
             if graph_padding_blocks <= 0:
-                graph_padding_blocks = max(max(graph_manager.block_buckets), max(getattr(graph_manager, "batch_sizes", (1,))))
+                graph_padding_blocks = max(getattr(graph_manager, "batch_sizes", graph_manager.block_buckets))
             graph_padding_block_ids = self.block_manager.allocate(
                 # BlockManager.allocate receives a token count, while the
                 # graph manager expresses scratch capacity in physical pages.

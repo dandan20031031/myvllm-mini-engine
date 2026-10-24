@@ -1,10 +1,10 @@
 # MiniQwenEngine 开发方案
 
-本文件是当前开发约定；路线变化同步更新，历史阶段报告保留当时状态。
+本文件是当前开发约定；路线变化同步更新。技术报告按主题合并至 [技术报告目录](reports/README.md)，阶段编号用于关联历史交付和实验文件。
 
 ## 2026-10-23：面向实习作品的执行计划（优先于下方历史顺序）
 
-目标是能解释、复现和部署的单卡推理系统。项目不追求复制完整 vLLM/SGLang，也不把尚未测量的优化写成加速结果。保留旧阶段编号及未完成项，下面是本轮实施顺序；每阶段分别提交代码、测试与调用链报告。
+目标是能解释、复现和部署的单卡推理系统。项目不追求复制完整 vLLM/SGLang，也不把尚未测量的优化写成加速结果。保留旧阶段编号及未完成项，下面是本轮实施顺序；每阶段提交代码、测试，并更新对应主题的调用链与验收记录。
 
 ### 行业对照与可行性
 
@@ -39,12 +39,15 @@ DeepInfer当前开源目标模型为DeepSeek-V4.1-Flash，官方说明是offline
 | 26（承接20） | D128 PagedAttention向量化、保留baseline、5种block size；恢复launch检查、CUDA greedy、构建hash隔离 | 已实现；FP16/BF16/Graph对拍通过，15组配对算子实验观察1.74–1.80x |
 | 27（承接15/19/22） | HTTP公平计量/条件校验、模型集成验收和可提交实验摘要 | 工具与本机验收已完成；外部vLLM/SGLang实测、完整质量集和独占GPU性能采集仍待执行 |
 | 28 | 真实引擎PyTorch Profiler/NVTX入口、CPU与GPU热点、Graph对照 | PyTorch eager/Graph采集与2项恢复/异常测试通过；Nsight已安装，但本执行环境CLI未生成report，硬件counter待采集 |
+| 29 | CLI Chat完整decode Graph、固定pinned/GPU metadata、图内greedy、同runner交替配对TTFT/TPOT/P50/P95 | 功能完成；FP16/BF16跨页/多轮/异常回收与batch缩容对拍，全量356 tests通过；真实模型结果见主题验收报告 |
+
+阶段29后优先级：先完成batch=1/2/4/8/16、短/长prompt的同条件MiniVLLM/外部引擎对照与服务并发稳定性验证，再选择直接paged多query/ragged prefill或低精度KV中的一条深化。PD分离、多GPU与训练型draft继续后置；单卡0.6B先用profiling证明收益再扩大架构。
 
 本轮完成可独立验收的23–27。旧计划的FP8 GEMM、INT8/FP8 KV、NVFP4/MXFP8、训练型draft仍是后续研究工作，不因本轮结束自动标记完成。它们分别需要独立kernel、模型质量验收以及Windows硬件/工具链证据；保留在阶段16/17/21中继续推进，不提供伪实现。已有W4A16不重复开发。
 
 ### 验收与简历表达
 
-2026-10-24验收：325 tests通过（CUDA/Graph/HTTP实际运行），完整0.6B的BF16、FP16 dandan与W4A16三组chunk/prefix/batch2/4 Graph全部通过；BF16并发HTTP/SSE完成后KV引用为0。详见`reports/STAGE_27_REPRODUCIBLE_BENCHMARK.md`和紧凑JSON摘要。
+2026-10-24验收：325 tests通过（CUDA/Graph/HTTP实际运行），完整0.6B的BF16、FP16 dandan与W4A16三组chunk/prefix/batch2/4 Graph全部通过；BF16并发HTTP/SSE完成后KV引用为0。详见[系统验证与性能评测](reports/VALIDATION_AND_BENCHMARKS.md)和紧凑JSON摘要。
 
 - 核心证据：相同权重下输出/数值对拍，prefix实际执行token计数，speculative接受/拒绝回退，混合长短请求无饥饿，SSE取消后page引用归还。
 - 性能矩阵：batch1/2/4/8，短/长prompt，共享/不共享前缀，greedy固定输出，BF16/cuBLAS及FP16/dandan/W4A16分别报告；不同精度不能混算优化收益。
@@ -60,7 +63,7 @@ DeepInfer当前开源目标模型为DeepSeek-V4.1-Flash，官方说明是offline
 - 项目源码、.venv、模型、编译输出、临时文件及可配置缓存均放在当前 D 盘项目目录。
 - Transformers 负责加载和正确性参考；native forward 和缓存由项目实现。
 - 不做多GPU、多模型通用适配；greedy prompt-lookup投机已实现，训练型draft继续独立评估。
-- 每阶段完成必要测试、代码解读报告、README/计划更新和本地 Git commit。
+- 每阶段完成必要测试、对应主题报告、README/计划更新和本地 Git commit。
 
 ## 2. 架构与数据流
 
@@ -150,7 +153,7 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 | 19 | 真实 batch CUDA Graph：eager/Graph 公平 TPOT、TPS、P50/P95 | 完成首轮；3 请求/32 token Graph benchmark 已通过，完整分位数和多 batch sweep 待扩展 |
 | 20 | PagedAttention kernel：vectorized load、flash-decoding、block size sweep | D128向量化与5种block sweep在26完成；更广形状/partition调优待做 |
 | 21 | 高性能量化：INT4/FP8 Tensor Core GEMM、FP8/INT8 KV、NVFP4/MXFP8 探索 | INT4 CUDA接入已在22完成；其余待实现，性能/质量继续评估 |
-| 22 | 可选 dandan_ops：FP16 Linear、W4A16 bridge、GQA Flash prefill、融合/Graph验证和同口径 benchmark | 功能/数值验收完成，201 tests通过；公平性能重测待空闲GPU和固定库版本，见 reports/STAGE_22_DANDAN_BACKEND.md |
+| 22 | 可选 dandan_ops：FP16 Linear、W4A16 bridge、GQA Flash prefill、融合/Graph验证和同口径 benchmark | 功能/数值验收完成；后续系统验收及公平性能复核见[系统验证与性能评测](reports/VALIDATION_AND_BENCHMARKS.md) |
 
 后续可按实测瓶颈调整算子顺序，并更新本文件。vLLM 不作为 Windows 引擎运行依赖；若比较环境使用不同 OS，必须披露差异，不能宣称严格同环境。
 
@@ -162,13 +165,13 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 - native logits 和 greedy，与 reference/Transformers 逐步对齐；量化需分开比较权重误差和缓存语义。
 - TTFT、TPOT、实际输出 tokens/s、显存、并发和分位数延迟；量化记录困惑度或固定任务质量。
 - 单算子记录 device timeline 和 eager wall time，端到端包含调度与同步；不混用口径。
-- 所有阶段生成 reports/STAGE_XX_*.md，解释每个模块、数据布局、调用链、测试结果、限制和下一阶段接口。
+- 实现与调用链更新至 `reports/ARCHITECTURE.md`，验收与计时口径更新至 `reports/VALIDATION_AND_BENCHMARKS.md`；保留必要JSON实验摘要，专项后端复核与性能分析指南独立维护，不再逐阶段新增重复报告。
 
 2026-10-23阶段22全量回归为201 passed、2 warnings；CUDA测试在RTX 5080上实际执行通过。完整Qwen3-0.6B已有历史生成/Graph benchmark，并新增FP16 dandan、W4A16和Flash prefill短序列数值验收。本轮backend性能对照受并发负载与外部库修改影响，不作为正式加速结论。
 
 阶段 05 Event 测量可能包括 Python 调度空隙，reference 包含 gather/同步/循环，历史加速比不能视为纯 kernel 或相对 vLLM 的结论。阶段 07 同时报告 Graph 重放和 eager wall；Graph 时间也包含节点调度，不称作纯指令时间。Paged Attention 和 elementwise 的加速数字是单算子或 reference 对比，不能直接外推为端到端 tokens/s。
 
-算子 CUDA Graph 测试通过，不等于所有服务路径都已完成 CUDA Graph 性能验收。当前真实 batch benchmark 已通过 `NativeBatchRuntime.decode_step` 的 Graph replay 路径；旧的单请求 benchmark 脚本中的 `--cuda-graph` 仍只记录配置，正式 Graph 对照请使用 `benchmark_native_batch.py`。独立 residual add 在实测 shape 下略慢于 PyTorch，保留可选后端，后续以融合降低开销。
+算子 CUDA Graph 测试通过，不等于所有服务路径都已完成 CUDA Graph 性能验收。真实 batch benchmark 调用`NativeBatchRuntime`；阶段29已修复单请求脚本的`--cuda-graph`为真实执行，并拒绝伪batch参数。推荐用`benchmark_chat_graph.py`做同runner交替配对的单请求实验，用`benchmark_native_batch.py`测batch。独立 residual add 在实测shape下略慢于PyTorch，后续以融合降低开销。
 
 ## 7. Git 工作流和存储
 

@@ -1,0 +1,410 @@
+{
+  "status": "passed_output_alignment",
+  "model": "Qwen3-0.6B",
+  "dtype": "fp16",
+  "pytorch": "2.9.1+cu128",
+  "torch_cuda": "12.8",
+  "client_os": "Windows-11-10.0.26200-SP0",
+  "seed": 41,
+  "configuration": {
+    "budgets": [
+      64,
+      128
+    ],
+    "warmup_pairs": 2,
+    "repetitions": 6,
+    "ignore_eos": true,
+    "projection_fusion": true,
+    "block_size": 16,
+    "num_blocks": 256,
+    "sampling": "greedy",
+    "sampling_backend": "cuda"
+  },
+  "source_and_backend_files_unchanged": true,
+  "timing_scope": "Same loaded runner and weights; generate_incremental(use_cuda_graph=False/True) changes only the per-call decode path. Runner latency spans prefill through last emitted token, excluding tokenization/text decode; outer call wall time includes those. First calls, warmup, nvidia-smi, file hashes and git queries are excluded from warmed summaries. No profiler or model hooks are active.",
+  "limitations": [
+    "Single-request local generation, not service latency or continuous-batching throughput.",
+    "Per-request TPOT is averaged over generated intervals; its P50/P95 describe requests, not the distribution of individual token intervals.",
+    "GPU snapshots and process lists do not establish exclusive hardware use, especially under Windows WDDM.",
+    "A first Graph request is capture-inclusive; pure capture time is unavailable unless separately provided by the runner status API.",
+    "Identical file fingerprints and token outputs are necessary checks, not independent verification of an uncontended GPU."
+  ],
+  "source": {
+    "git_commit": "ae967ddc1da9156a03b4bb78f123c074c9bc9338",
+    "git_dirty": true,
+    "source_tree_sha256": "db3c5e8b42d0fae1456bcea68399214cd9c22b34c0da725649b120c9bf776fad",
+    "note": "Measured before the stage commit; source_tree_sha256 covers inference sources plus benchmark entrypoint. Raw start/end hashes match."
+  },
+  "backends": {
+    "prefill": "cuda",
+    "decode": "cuda",
+    "elementwise": "cuda",
+    "data": "cuda",
+    "linear": "cuda/cuBLAS",
+    "sampling": "cuda",
+    "projection_fusion": true,
+    "quantization": null
+  },
+  "tests": {
+    "passed": 356,
+    "warnings": 2,
+    "cuda_executed": true,
+    "log": "build/tmp/pytest_stage29.log"
+  },
+  "cli_smoke": {
+    "passed": true,
+    "turns": 2,
+    "clear": true,
+    "graph": true,
+    "log": "build/tmp/chat_graph_smoke.log"
+  },
+  "cases": [
+    {
+      "prompt": "Explain KV Cache in one paragraph.",
+      "max_new_tokens": 64,
+      "capture_during_measured_requests": false,
+      "summary": {
+        "outputs_match": true,
+        "comparison_allowed": true,
+        "modes": {
+          "eager": {
+            "requests": 6,
+            "actual_output_tokens": 384,
+            "ttft_ms": {
+              "count": 6,
+              "p50": 20.59749999898486,
+              "p95": 21.417849998215388
+            },
+            "tpot_ms": {
+              "count": 6,
+              "p50": 16.719413492070984,
+              "p95": 17.518964285724024
+            },
+            "total_latency_ms": {
+              "count": 6,
+              "p50": 1073.9966499986622,
+              "p95": 1124.4534999987081
+            },
+            "outer_call_wall_ms": {
+              "count": 6,
+              "p50": 1074.5731500010152,
+              "p95": 1125.001575001079
+            },
+            "sum_request_latency_ms": 6494.627399995807,
+            "sum_outer_call_wall_ms": 6498.09680000908,
+            "total_tokens_per_second": 59.12579372917497,
+            "outer_call_tokens_per_second": 59.09422586617414
+          },
+          "cuda_graph": {
+            "requests": 6,
+            "actual_output_tokens": 384,
+            "ttft_ms": {
+              "count": 6,
+              "p50": 20.44000000023516,
+              "p95": 21.17544999873644
+            },
+            "tpot_ms": {
+              "count": 6,
+              "p50": 2.529526190488786,
+              "p95": 2.5703436508087583
+            },
+            "total_latency_ms": {
+              "count": 6,
+              "p50": 180.09019999954035,
+              "p95": 181.84437500076456
+            },
+            "outer_call_wall_ms": {
+              "count": 6,
+              "p50": 180.6723999998212,
+              "p95": 182.33895000048506
+            },
+            "sum_request_latency_ms": 1074.0904999984195,
+            "sum_outer_call_wall_ms": 1077.453299996705,
+            "total_tokens_per_second": 357.51177391529393,
+            "outer_call_tokens_per_second": 356.3959570230787
+          }
+        },
+        "graph_over_eager_throughput_ratio": 6.046629590342119,
+        "note": "Total TPS is sum(actual emitted tokens)/sum(request latency), not the median of per-request TPS. Outer-call TPS additionally includes tokenization/text decoding and wrapper overhead. GPU snapshots and metadata collection are excluded from both."
+      },
+      "graph_status_after_setup": {
+        "capture_count": 1,
+        "last_capture_ms": 66.2095000006957,
+        "captured_buckets": [
+          {
+            "batch_size": 1,
+            "max_blocks": 8
+          }
+        ],
+        "scratch_pages": 1,
+        "sampling_captured": true
+      }
+    },
+    {
+      "prompt": "Explain KV Cache in one paragraph.",
+      "max_new_tokens": 128,
+      "capture_during_measured_requests": false,
+      "summary": {
+        "outputs_match": true,
+        "comparison_allowed": true,
+        "modes": {
+          "eager": {
+            "requests": 6,
+            "actual_output_tokens": 768,
+            "ttft_ms": {
+              "count": 6,
+              "p50": 19.628699999884702,
+              "p95": 22.631500000898086
+            },
+            "tpot_ms": {
+              "count": 6,
+              "p50": 15.583369291332957,
+              "p95": 17.400107874010697
+            },
+            "total_latency_ms": {
+              "count": 6,
+              "p50": 1997.838649998812,
+              "p95": 2231.3361750002514
+            },
+            "outer_call_wall_ms": {
+              "count": 6,
+              "p50": 1998.3450499985338,
+              "p95": 2231.8727999991097
+            },
+            "sum_request_latency_ms": 12223.56089999812,
+            "sum_outer_call_wall_ms": 12226.716299996042,
+            "total_tokens_per_second": 62.82948203744117,
+            "outer_call_tokens_per_second": 62.813267369281206
+          },
+          "cuda_graph": {
+            "requests": 6,
+            "actual_output_tokens": 768,
+            "ttft_ms": {
+              "count": 6,
+              "p50": 19.752650001464644,
+              "p95": 24.250949998531723
+            },
+            "tpot_ms": {
+              "count": 6,
+              "p50": 2.6571842519742646,
+              "p95": 2.784472440943655
+            },
+            "total_latency_ms": {
+              "count": 6,
+              "p50": 358.49009999947157,
+              "p95": 371.42024999957357
+            },
+            "outer_call_wall_ms": {
+              "count": 6,
+              "p50": 359.1772000017954,
+              "p95": 371.9726499994067
+            },
+            "sum_request_latency_ms": 2163.138499996421,
+            "sum_outer_call_wall_ms": 2166.9667000023765,
+            "total_tokens_per_second": 355.03967961425985,
+            "outer_call_tokens_per_second": 354.41246051411764
+          }
+        },
+        "graph_over_eager_throughput_ratio": 5.650845241771779,
+        "note": "Total TPS is sum(actual emitted tokens)/sum(request latency), not the median of per-request TPS. Outer-call TPS additionally includes tokenization/text decoding and wrapper overhead. GPU snapshots and metadata collection are excluded from both."
+      },
+      "graph_status_after_setup": {
+        "capture_count": 2,
+        "last_capture_ms": 38.91039999871282,
+        "captured_buckets": [
+          {
+            "batch_size": 1,
+            "max_blocks": 8
+          },
+          {
+            "batch_size": 1,
+            "max_blocks": 16
+          }
+        ],
+        "scratch_pages": 1,
+        "sampling_captured": true
+      }
+    },
+    {
+      "prompt": "用一小段话解释 continuous batching。",
+      "max_new_tokens": 64,
+      "capture_during_measured_requests": false,
+      "summary": {
+        "outputs_match": true,
+        "comparison_allowed": true,
+        "modes": {
+          "eager": {
+            "requests": 6,
+            "actual_output_tokens": 384,
+            "ttft_ms": {
+              "count": 6,
+              "p50": 18.910849999883794,
+              "p95": 23.581175000799703
+            },
+            "tpot_ms": {
+              "count": 6,
+              "p50": 16.93752539684947,
+              "p95": 18.87652301584673
+            },
+            "total_latency_ms": {
+              "count": 6,
+              "p50": 1087.8080000002228,
+              "p95": 1208.204924999336
+            },
+            "outer_call_wall_ms": {
+              "count": 6,
+              "p50": 1088.2827000004909,
+              "p95": 1208.6817500003235
+            },
+            "sum_request_latency_ms": 6652.1733999979915,
+            "sum_outer_call_wall_ms": 6655.030100002477,
+            "total_tokens_per_second": 57.72549464812747,
+            "outer_call_tokens_per_second": 57.70071573378114
+          },
+          "cuda_graph": {
+            "requests": 6,
+            "actual_output_tokens": 384,
+            "ttft_ms": {
+              "count": 6,
+              "p50": 23.49320000030275,
+              "p95": 26.401125000120373
+            },
+            "tpot_ms": {
+              "count": 6,
+              "p50": 2.586696031733207,
+              "p95": 2.7052591269874404
+            },
+            "total_latency_ms": {
+              "count": 6,
+              "p50": 187.61255000026722,
+              "p95": 196.0356999998112
+            },
+            "outer_call_wall_ms": {
+              "count": 6,
+              "p50": 188.16074999813281,
+              "p95": 196.5440749991103
+            },
+            "sum_request_latency_ms": 1122.4399999991874,
+            "sum_outer_call_wall_ms": 1125.6410999922082,
+            "total_tokens_per_second": 342.11182780396103,
+            "outer_call_tokens_per_second": 341.13892963099704
+          }
+        },
+        "graph_over_eager_throughput_ratio": 5.926529168599487,
+        "note": "Total TPS is sum(actual emitted tokens)/sum(request latency), not the median of per-request TPS. Outer-call TPS additionally includes tokenization/text decoding and wrapper overhead. GPU snapshots and metadata collection are excluded from both."
+      },
+      "graph_status_after_setup": {
+        "capture_count": 2,
+        "last_capture_ms": 38.91039999871282,
+        "captured_buckets": [
+          {
+            "batch_size": 1,
+            "max_blocks": 8
+          },
+          {
+            "batch_size": 1,
+            "max_blocks": 16
+          }
+        ],
+        "scratch_pages": 1,
+        "sampling_captured": true
+      }
+    },
+    {
+      "prompt": "用一小段话解释 continuous batching。",
+      "max_new_tokens": 128,
+      "capture_during_measured_requests": false,
+      "summary": {
+        "outputs_match": true,
+        "comparison_allowed": true,
+        "modes": {
+          "eager": {
+            "requests": 6,
+            "actual_output_tokens": 768,
+            "ttft_ms": {
+              "count": 6,
+              "p50": 22.18094999989262,
+              "p95": 26.635349999196478
+            },
+            "tpot_ms": {
+              "count": 6,
+              "p50": 16.86240157481032,
+              "p95": 17.868207480305717
+            },
+            "total_latency_ms": {
+              "count": 6,
+              "p50": 2167.127200000323,
+              "p95": 2290.7658249987435
+            },
+            "outer_call_wall_ms": {
+              "count": 6,
+              "p50": 2167.6878500020393,
+              "p95": 2291.2660500005586
+            },
+            "sum_request_latency_ms": 12627.021100001002,
+            "sum_outer_call_wall_ms": 12630.186300008063,
+            "total_tokens_per_second": 60.8219463575569,
+            "outer_call_tokens_per_second": 60.80670401508723
+          },
+          "cuda_graph": {
+            "requests": 6,
+            "actual_output_tokens": 768,
+            "ttft_ms": {
+              "count": 6,
+              "p50": 24.39589999994496,
+              "p95": 27.11752499726572
+            },
+            "tpot_ms": {
+              "count": 6,
+              "p50": 2.648231496074348,
+              "p95": 2.6700222440807933
+            },
+            "total_latency_ms": {
+              "count": 6,
+              "p50": 360.402049998811,
+              "p95": 364.51792499792646
+            },
+            "outer_call_wall_ms": {
+              "count": 6,
+              "p50": 360.90005000005476,
+              "p95": 365.01747500005877
+            },
+            "sum_request_latency_ms": 2162.7120999946783,
+            "sum_outer_call_wall_ms": 2165.8099999986007,
+            "total_tokens_per_second": 355.10967918563443,
+            "outer_call_tokens_per_second": 354.6017425353545
+          }
+        },
+        "graph_over_eager_throughput_ratio": 5.838512255067178,
+        "note": "Total TPS is sum(actual emitted tokens)/sum(request latency), not the median of per-request TPS. Outer-call TPS additionally includes tokenization/text decoding and wrapper overhead. GPU snapshots and metadata collection are excluded from both."
+      },
+      "graph_status_after_setup": {
+        "capture_count": 2,
+        "last_capture_ms": 38.91039999871282,
+        "captured_buckets": [
+          {
+            "batch_size": 1,
+            "max_blocks": 8
+          },
+          {
+            "batch_size": 1,
+            "max_blocks": 16
+          }
+        ],
+        "scratch_pages": 1,
+        "sampling_captured": true
+      }
+    }
+  ],
+  "batch_smoke": {
+    "purpose": "functional regression only, not the paired performance result",
+    "dtype": "fp16",
+    "batch_size": 3,
+    "output_budget_per_request": 16,
+    "samples_per_mode": 2,
+    "actual_tokens_per_sample": 48,
+    "eager_graph_output_match": true,
+    "repeat_output_match": true,
+    "log": "build/tmp/batch_graph_stage29_smoke.log"
+  }
+}

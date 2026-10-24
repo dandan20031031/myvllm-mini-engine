@@ -44,6 +44,8 @@ def main():
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "benchmarks" / "results" / "native_qwen3.json")
     args = parser.parse_args()
+    if args.batch_size != 1:
+        parser.error("this benchmark is single-request; use benchmark_native_batch.py for real batches")
     configure_local_cache()
     model_path = Path(args.model)
     if args.local_files_only and not model_path.is_dir():
@@ -56,6 +58,7 @@ def main():
         elementwise_backend=args.elementwise_backend, data_backend=args.data_backend,
         linear_backend=args.linear_backend, local_files_only=args.local_files_only,
         fuse_projections=args.fuse_projections,
+        use_cuda_graph=args.cuda_graph,
     )
     for prompt in prompts:
         for _ in range(args.warmup):
