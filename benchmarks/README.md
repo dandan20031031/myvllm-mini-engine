@@ -6,6 +6,7 @@
 |---|---|
 | `benchmark_paged_sweep.py` | 原CUDA与D128向量化kernel配对Graph计时，5种block size；非服务延迟 |
 | `benchmark_native_batch.py` | 真实scheduler eager/Graph对照，实际token统计和后端指纹 |
+| `benchmark_ragged_prefill.py` | 同模型B1完整logits、B1末行logits、packed末行logits三路径forward消融；不测生成或HTTP |
 | `benchmark_speculative.py` | 普通greedy/投机输出一致性、接受率和单请求耗时 |
 | `benchmark_http.py` | 标准库HTTP/SSE负载，可对兼容服务采集usage、TTFT/P95与吞吐；`--compare`拒绝不匹配条件 |
 | `validate_system_extensions.py` | 完整模型chunk/prefix/Graph与可选真实HTTP验证，仅正确性不测速 |
@@ -14,6 +15,25 @@
 客户端usage缺失时，不以SSE chunk数代替token数。性能主对照为Nano-vLLM和MiniVLLM，vLLM/SGLang只作架构参考。本仓库尚无三个小型引擎的同条件实测排名。
 
 `mini_engine.benchmarks.runner`提供通用callable计时和JSON输出，适合固定工作量的局部实验；它不会自动校验实际生成token数或模型语义。完整跨引擎对照还需共同离线adapter，不能直接把配置中的`output_tokens`当实测输出。
+
+## Ragged Prefill内部消融
+
+```powershell
+. .\scripts\enter_project.ps1
+.\.venv\Scripts\python benchmarks\benchmark_ragged_prefill.py `
+  --model .\models\Qwen3-0.6B --dtype fp16 `
+  --prefill-backend cuda --data-backend cuda --elementwise-backend cuda `
+  --linear-backend cuda --batch-sizes 1 2 4 --prompt-lengths 32 64 `
+  --warmup 2 --repetitions 5 --output benchmarks\results\ragged_prefill.json
+```
+
+三种模式使用同一已加载模型、后端、输入token和预分配KV池：`sequential_full_logits`逐个B1计算全部query logits，`sequential_selected_logits`逐个B1仅计算末行，`ragged_selected_logits`合成一个packed batch并选择各请求末行。最大prompt长度按四分之一阶梯产生不同请求长度，先对拍末行logits、greedy token与KV，再轮转执行顺序测量。
+
+计时包括公开forward校验、选择行索引校验/设备索引tensor创建、输出copy及完成同步；排除模型加载、tokenizer、PrefillBatch构造、host行选择规划、对拍、warmup、指纹采集与清理。CUDA Events记录dispatch时间线，包含launch间隙，不是纯kernel指令延迟。这里报告prefill输入token/s、forward wall time与显存峰值，**不测TTFT、decode、scheduler、sampling、生成TPS或HTTP**。实际服务收益另用`benchmark_native_batch.py`/HTTP工具验收。
+
+CUDA模式直接读paged KV；显式`auto/math/dandan`模式仍逐请求dense attention，仅投影/MLP等合批，不报告为varlen Flash。显存分配峰值包含模型、KV池与输出buffer，额外allocated峰值相对调用前基线；reserved受allocator缓存及此前模式影响，不是隔离进程占用。结果范围和实际观察见[验证报告](../reports/VALIDATION_AND_BENCHMARKS.md)及[ragged摘要](../reports/ragged_prefill_summary.json)，不从功能覆盖预设加速比。
+
+本机FP16 B2长度32/24在严格KV逐元素阈值下失败，脚本会保留诊断并在计时前停止。B1的严格验收可用`--batch-sizes 1`；显式`--skip-kv-check`仅记录探索性原始时间，标记`validation_incomplete`且禁止倍率。用`diagnose_ragged_prefill.py`复现逐层/head误差、8-token独立greedy与同舍入权重FP32对照。短输出一致不证明batch invariance，不应只为跑完矩阵而放宽阈值。
 
 ## Nano-vLLM / MiniVLLM 对照任务
 

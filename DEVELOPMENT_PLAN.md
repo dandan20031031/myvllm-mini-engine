@@ -2,6 +2,23 @@
 
 本文件是当前开发约定；路线变化同步更新。技术报告按主题合并至 [技术报告目录](reports/README.md)，阶段编号用于关联历史交付和实验文件。
 
+## 2026-10-25：Ragged Prefill与选择性LM head落地
+
+本轮将同一调度轮的非空prompt chunks打包为`PrefillBatch`：Embedding、QKV/MLP和Norm按总query行数执行；`--prefill-backend cuda`使用自有CUDA直接读取paged历史KV，保持每请求的绝对位置和causal边界。`auto/math/flash/dandan`明确保留逐请求dense attention，只有投影、MLP等计算合批，不称为varlen Flash。
+
+| 工作 | 当前落地与边界 |
+|---|---|
+| 执行批次 | `engine/batch.py`统一input IDs、cu_seqlens_q、绝对positions、query starts/context lengths、block tables与flat KV slots；拒绝重复写槽或写共享页，允许只读完整Prefix页共享 |
+| 模型与CUDA | 原生packed prefill复用扁平投影/MLP与RoPE；CUDA attention直接读非连续物理页，包括不同历史长度的suffix；decode与prefill仍分开执行 |
+| 选择性LM head | CLI只投影prompt末行；runtime投影完成prompt的末行与必要Prefix边界行的并集。无所需logits行的chunk仍推进KV、跳过LM head；未完成prompt不采样 |
+| Prefix与异常 | 精确命中不进入非空packed batch，继续复用boundary logits；非对齐边界按packed行号保存；执行失败中止本轮相关chunks，不修改共享前缀页 |
+| 兼容与计量 | 旧单请求forward默认返回全部query logits，供reference/投机验证；新增selected rows与packed接口。Graph仍仅decode；三路径forward消融区分行选择与合批，不将结果当生成TPS |
+| 验收现状 | 最终467 tests通过；BF16 CUDA、FP16 dandan、W4A16的完整模型chunk/Prefix/batch2/4 Graph通过，BF16另过HTTP/SSE。FP16合批的严格逐元素KV阈值仍未通过；B1严格数据和多请求探索性数据分开，禁止后者正式倍率 |
+
+实现与调用链并入[架构报告](reports/ARCHITECTURE.md)，数值/资源验收及受控测量见[验证报告](reports/VALIDATION_AND_BENCHMARKS.md)与[紧凑摘要](reports/ragged_prefill_summary.json)。本轮不扩展Qwen3.5或独立加载器，不依据功能完成预设加速比例。下一步继续两个主对照的共同离线adapter、不同长度/并发下的受控计量，再按profiling决定paged prefill分块/融合或算子库varlen接口的投入。
+
+性能前置项：扩展FP16形状变化的逐层误差、较长生成与质量验收，明确KV误差预算；当前FP32对照及8-token一致仅支持舍入差异解释，不能标记batch invariance完成。本次选择性LM head主要减少额外显存，未观察到稳定延迟收益；不因功能已接入而宣布所有阶段加速。
+
 ## 2026-10-25：主对照调整为 Nano-vLLM 与 MiniVLLM
 
 两个小型引擎同时对比架构与性能：Nano-vLLM采用[GeeeekExplorer/nano-vllm](https://github.com/GeeeekExplorer/nano-vllm)，MiniVLLM采用[Wenyueh/MinivLLM](https://github.com/Wenyueh/MinivLLM)。vLLM/SGLang保留为工业架构参考，不要求性能跑分。固定源码、区别上游和本地补丁；不以名称相近的其他mini-vllm仓库代替。
@@ -13,7 +30,7 @@
 | 共用离线benchmark adapter | 待实现；统一token IDs、模型哈希、实际权重/KV dtype、固定输出、计时边界和逐次样本。HTTP只测本项目服务，不用缺少同类HTTP接口的对照实现作伪服务对比 |
 | Windows可行性 | Mini已有本地Windows/Graph修复；须显式选择worktree并纠正迁移后的editable导入路径。Nano当前仍有NCCL/flash-attn依赖，尚无本机可运行GPU基线；不为跑分引入Linux/WSL或静默替换attention |
 | 统一性能矩阵 | 首轮FP16、TP1、B=1/4/8/16、prompt=128/512、output=128，分别eager/Graph。Nano/Mini原采样拒绝greedy，使用共同temperature=0.6、top-k禁用/top-p=1与固定输出；任何greedy或ignore-EOS适配都记录补丁 |
-| 下一项引擎优化 | 优先评估prefill只对最后一行及Prefix边界行计算LM head，随后补真正ragged/paged prefill；完成各自正确性和独立消融后才宣称加速 |
+| 本轮引擎优化 | 选择性LM head、packed projection/MLP与直接paged CUDA prefill已实现；其他attention后端仍逐请求dense执行，正确性与性能边界见本文件首节 |
 
 完整协议、已有数值与待补条件见[性能评测报告](reports/VALIDATION_AND_BENCHMARKS.md)和[benchmark目录](benchmarks/README.md)。本次仅完成源码与历史性能证据审计，没有运行新的三方性能实验。下面旧计划中仅写MiniVLLM的对照目标均扩展为Nano-vLLM与MiniVLLM；原实验数据保留原范围。
 
@@ -31,7 +48,7 @@
 
 该调整以职责边界和可维护性为验收目标，不声称增加吞吐或减少延迟。保持已有命令、历史实验数据和阶段记录；不新增一套重复的阶段报告。以下历史阶段状态与性能证据保留原实验范围。
 
-本轮结构维护已验收，benchmark、profiling与系统验证脚本统一调用`runtime.close()`；每轮性能测量间的Prefix清空仍保留在原计时边界外。后续先补Nano-vLLM/MiniVLLM共同benchmark与选择性LM head，再推进ragged/paged prefill；低精度KV按profiling结果后置，暂不扩大模型架构范围。
+结构维护已验收，benchmark、profiling与系统验证脚本统一调用`runtime.close()`；每轮性能测量间的Prefix清空仍保留在原计时边界外。其后已实现选择性LM head及ragged/paged CUDA prefill；后续继续Nano-vLLM/MiniVLLM共同benchmark与受控消融，低精度KV按profiling结果后置，暂不扩大模型架构范围。
 
 ## 2026-10-23：面向实习作品的执行计划（优先于下方历史顺序）
 
@@ -74,7 +91,7 @@ DeepInfer保留为异步调度、确定性与投机机制的阅读参考，不�
 | 28 | 真实引擎PyTorch Profiler/NVTX入口、CPU与GPU热点、Graph对照 | PyTorch eager/Graph采集与2项恢复/异常测试通过；Nsight已安装，但本执行环境CLI未生成report，硬件counter待采集 |
 | 29 | CLI Chat完整decode Graph、固定pinned/GPU metadata、图内greedy、同runner交替配对TTFT/TPOT/P50/P95 | 功能完成；FP16/BF16跨页/多轮/异常回收与batch缩容对拍，全量356 tests通过；真实模型结果见主题验收报告 |
 
-阶段29后优先级：结构维护与403项回归已完成，Nano-vLLM/MiniVLLM源码差异已核对；下一步补共同离线计量接口、选择性LM head与同条件性能数据，再深化ragged/paged prefill。本项目服务稳定性独立验收；PD分离、多GPU与训练型draft继续后置。
+阶段29后优先级：结构维护基线与两个主对照的源码审计已完成；选择性LM head及ragged/paged CUDA prefill随后落地，继续补共同离线计量接口、受控消融与后端形状覆盖。本项目服务稳定性独立验收；PD分离、多GPU与训练型draft继续后置。
 
 本轮完成可独立验收的23–27。旧计划的FP8 GEMM、INT8/FP8 KV、NVFP4/MXFP8、训练型draft仍是后续研究工作，不因本轮结束自动标记完成。它们分别需要独立kernel、模型质量验收以及Windows硬件/工具链证据；保留在阶段16/17/21中继续推进，不提供伪实现。已有W4A16不重复开发。
 
@@ -115,7 +132,7 @@ HTTP: serving.http -> InferenceService worker -> NativeBatchRuntime.step
 
 两条路径共享模型、缓存实现与算子，生成循环仍各自独立。早期`LLMEngine`保留为facade/reference接口，不是原生Chat或HTTP的必经入口。`server.py`只保留服务命令行启动与兼容导出；服务协议、worker、传输分别归`serving`的三个模块。
 
-NativeQwen3Runner持有模型、BlockManager和KVCachePool；`create_batch_runtime()`创建使用它们的可关闭batch会话。Prefill按请求分块并优先让decode推进；完整prefix可直接复用logits。runtime.close归还会话请求页、Prefix引用和自有Graph资源，外部提供的manager/padding页遵守借用边界；调用方应先停止worker并关闭runtime，再关闭或复用runner。CLI的finally关闭runner持有的Chat Graph与scratch。
+NativeQwen3Runner持有模型、BlockManager和KVCachePool；`create_batch_runtime()`创建使用它们的可关闭batch会话。调度优先推进decode，再将非空prompt chunks合并为`PrefillBatch`；完整prefix直接复用logits，不进入packed query计算。CUDA后端直接paged attention，其他后端保留逐请求dense attention。runtime.close归还会话请求页、Prefix引用和自有Graph资源，外部提供的manager/padding页遵守借用边界；调用方应先停止worker并关闭runtime，再关闭或复用runner。CLI的finally关闭runner持有的Chat Graph与scratch。
 
 KV 布局是 [layer, physical_block, token_in_block, kv_head, head_dim]。KV 精度当前与浮点模型一致；低精度权重不代表低精度 KV。
 
@@ -245,7 +262,7 @@ RTX 5080 是 SM 12.0。PyTorch 的 float4 dtype 及硬件候选能力不能证�
 
 2026-10-23 调整：18/19 首轮完成后，先执行阶段22接入现成的 dandan_ops，不要求引擎等待算子库最终优化。三种正式路径为 BF16 CUDA/cuBLAS 基线、FP16 dandan 可选后端、INT4+FP16 W4A16。保持默认后端不变；显式后端缺失能力/不兼容配置要提前报错。记录库源码、二进制及路由 profile 指纹；每次升级重新验证 logits/KV/Graph 和端到端性能。
 
-2026-10-25更新：阶段23–29及结构维护已验收。主对照为Nano-vLLM/MiniVLLM架构与性能，工业框架只作源码参考；新增选择性LM head评估，再深化paged多query/ragged prefill。下面18/19顺序保留为历史背景。
+2026-10-25更新：阶段23–29及结构维护已验收；选择性LM head与paged多query/ragged prefill已落地，当前边界和下一步见首节。主对照为Nano-vLLM/MiniVLLM架构与性能，工业框架只作源码参考；下面18/19顺序保留为历史背景。
 
 MiniVLLM 的 RTX 5080 profiler 显示，eager decode 的主要问题是 CPU kernel launch 空洞，GPU 时间主要集中在小 batch GEMM；其 PagedAttention 只占较小比例。因此优化顺序固定为：
 

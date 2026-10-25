@@ -1,6 +1,6 @@
 # 推理引擎架构与实现
 
-更新至2026-10-25，整合原阶段00–29及本轮结构维护的实现说明。范围为Windows 11单GPU、Qwen3-0.6B；HuggingFace负责权重加载、tokenizer和正确性参考，native forward、缓存、调度与CUDA扩展由项目实现。运行命令见 [项目 README](../README.md)，证据见 [系统验证与性能评测](VALIDATION_AND_BENCHMARKS.md)。
+更新至2026-10-25，整合原阶段00–29、结构维护及ragged/paged prefill的实现说明。范围为Windows 11单GPU、Qwen3-0.6B；HuggingFace负责权重加载、tokenizer和正确性参考，native forward、缓存、调度与CUDA扩展由项目实现。运行命令见 [项目 README](../README.md)，证据见 [系统验证与性能评测](VALIDATION_AND_BENCHMARKS.md)。
 
 ## 调用链与代码入口
 
@@ -31,6 +31,7 @@ HTTP -> serving.http -> InferenceService.submit -> 单GPU worker._run
 | `mini_engine/model/native_qwen3.py` | Embedding、Q/K RMSNorm、RoPE、GQA、SwiGLU及prefill/decode/suffix forward |
 | `mini_engine/cache/` | 物理页引用、逻辑块表、KV tensor和完整prefix索引 |
 | `mini_engine/engine/request.py`、`scheduler.py`、`runtime.py` | 请求状态、token预算、decode优先执行、采样与回收 |
+| `mini_engine/engine/batch.py` | PrefillBatch的packed query边界、绝对位置、页表/写槽与共享页校验 |
 | `mini_engine/engine/cuda_graph.py` | 固定形状bucket、scratch页、capture/replay |
 | `mini_engine/kernels/`、`quantization/` | Torch reference、CUDA与可选dandan后端 |
 | `mini_engine/speculative.py` | 单请求greedy投机、提案与验证、KV逻辑回退 |
@@ -54,9 +55,49 @@ Prefix仅共享完整block。部分命中从 `position=prefix_len` 计算suffix�
 
 每轮先执行decode，再用剩余 `max_num_batched_tokens` 预算推进prefill；`prefill_chunk_size`限制单请求chunk。decode超预算时轮转。调度器按请求最大KV需求做保守虚拟预留，物理页按需分配；永久超容量请求报错，暂时不足等待。最终输出token不再送回模型，KV需求为 `prompt_len + max_new_tokens - 1`。EOS、取消和执行/采样异常均释放请求引用。
 
-模型接口 `model(suffix_ids, cache, block_ids, position=n)` 返回 `[suffix_length, vocab_size]`。单token且 `position>0` 直接读paged KV；多token suffix在写入新KV后gather前缀和suffix，再做 `query_start=n` 的绝对位置causal attention。CUDA/dandan保持原生GQA，Torch分支按需扩展KV heads。
+模型接口 `model(suffix_ids, cache, block_ids, position=n)` 默认返回 `[suffix_length, vocab_size]`。普通单token且`position>0`继续使用既有paged decode；prefill/多token suffix共享packed模型路径。CUDA prefill直接读取paged历史KV，dense后端按请求gather已有前缀并计算绝对位置causal attention。CUDA/dandan保持原生GQA，Torch分支按需扩展KV heads。
 
-当前chunk仍逐请求执行，多query验证仍gather dense KV；尚未实现ragged batched prefill、直接paged多query attention或安全preemption。最大预算预留会限制高输出上限场景的并发。
+CUDA后端已实现ragged batched prefill和直接paged多query attention。`auto/math/flash/dandan`仍逐请求执行dense attention，其投影和MLP合批。调度仍先decode、后prefill，不是一个统一的混合GPU执行批次；尚无安全preemption，最大预算预留会限制高输出上限场景的并发。
+
+## Ragged Prefill与选择性LM head
+
+同轮多个chunk不补齐到最大prompt长度，而是拼成`[total_query_tokens, hidden_size]`执行Embedding、投影、Norm和MLP。attention仍按请求分界：一个请求只能看到自己的历史KV，以及当前chunk中不晚于query绝对位置的key。不同prefix长度不改变这一隔离规则。
+
+```text
+Scheduler.prefill ranges -> NativeBatchRuntime.prefill_step
+                                    |
+                       PrefillBatch.from_sequences
+                                    |
+           NativeQwen3.forward_prefill_batch / B1 public forward
+                                    |
+           packed Embedding -> QKV/Norm/RoPE -> flat KV scatter
+                                    |
+              CUDA paged varlen attention / per-request dense attention
+                                    |
+                    packed O projection / Residual / MLP
+                                    |
+             selected query rows -> final Norm / LM head -> Prefix / sampling
+```
+
+`engine/batch.py`将CPU调度结果转为一次执行的只读metadata。构造前在host校验请求数量、token/页范围、容量、重复写槽和共享页写入；允许完整只读prefix页共享，禁止任一请求写本批其他请求引用的页。公开模型入口校验metadata与cache/model匹配，逐层CUDA调用使用可信metadata，避免逐层device-to-host检查。
+
+| Metadata | 形状与含义 |
+|---|---|
+| input_ids / positions | `[T]`；真实query token及逐请求绝对位置，不使用flatten后的全局序号作RoPE位置 |
+| cu_seqlens_q | `[B+1]`；每请求在packed Q中的起止，`T=sum(query_lengths)` |
+| query_starts / context_lens | `[B]`；本轮前已有KV长度与本轮后总长度，后者等于start+query length |
+| block_tables / slot_mapping | `[B,max_blocks]`与`[T]`；读历史的逻辑页表，以及新KV的物理写槽 |
+| host tuples | query_lengths、query_offsets、starts、block_ids；用于结果映射与dense reference，不把Q边界误当历史KV边界 |
+
+对请求r的新query i，位置为`starts[r]+i`，写槽为`block_tables[r, position//block_size]*block_size + position%block_size`。`kernels/data.py::write_kv_cache_slots`一次提交所有新K/V；`kernels/prefill.py::paged_prefill_attention`及`csrc/prefill.cu`按cu_seqlens_q定位请求，直接读其paged KV、应用各自的绝对causal上界，不gather整段历史。该CUDA路径支持FP16/BF16与GQA，仍是项目自有kernel，不宣称达到FlashAttention性能。
+
+`--prefill-backend cuda`选择上述直接paged路径。`auto/math/flash/dandan`保持显式后端语义：每请求调用既有dense prefill API，只有投影/MLP等合批；有历史前缀时仍gather。`flash`继续是严格PyTorch Flash选择，`dandan`继续检查库的FP16/D128能力，不能静默改为本项目CUDA或宣称算子库已支持varlen Flash。
+
+选择性输出通过`logits_rows`指定packed query行，先选hidden rows再执行final Norm和LM head。CLI普通生成只需prompt末行；runtime取完成prompt的末行与本轮最新完整Prefix边界行的并集，保留行号到请求的映射。空选择仍执行decoder与KV写入，但跳过final Norm/LM head；未完成prompt不采样，启用Prefix时中间chunk仍可能为边界缓存计算logits。精确Prefix命中没有新query，留在packed batch外直接使用已缓存logits。
+
+`forward_prefill_batch(batch, cache, logits_rows=...)`通过Module调用进入公开forward，保留模型hook；B1保留原单请求hook/position语义。旧`forward(input_ids, cache, block_ids, position=...)`默认完整logits不变，reference和投机验证继续使用；不具备新batch接口的外部reference runner仍走兼容执行协议。packed阶段发生无法归因的异常时中止本轮相关chunks并释放请求引用；已共享的prefix页只读。
+
+正确性、资源归还与三路径forward消融见[验证报告](VALIDATION_AND_BENCHMARKS.md)和[ragged摘要](ragged_prefill_summary.json)。消融分别固定B1完整logits、B1末行logits、packed末行logits；仅测预建metadata后的forward，不等同于TTFT、生成TPS或HTTP吞吐。Graph仍只覆盖decode，本轮未把ragged prefill捕获进图。
 
 ## CUDA Graph与投影融合
 
@@ -78,7 +119,7 @@ capture本身也会写KV，必须使用与live页分离的scratch页；每个ina
 |---|---|
 | PagedAttention | FP16/BF16、GQA、非连续物理页、split-KV；D128使用Pack4对齐访问和warp归约，其他维度走原实现；`cuda_baseline`保留实验对照 |
 | Elementwise/data | RMSNorm、Residual+RMSNorm、Residual Add、SiLU×Up、Embedding、RoPE和分页KV scatter；保留Torch reference |
-| Prefill/suffix | 自有CUDA支持矩形Q/K及绝对位置causal mask；correctness kernel最长8192；可选dandan dense Flash |
+| Prefill/suffix | 新packed CUDA直接读paged KV、逐请求绝对causal与flat scatter；旧dense correctness helper保留8192 KV上限，新paged路径受模型/页表容量与head_dim约束；dandan仍为dense Flash |
 | Greedy采样 | 显式可选CUDA两级argmax，覆盖tie/NaN/Inf和词表尾部；仅temperature=0，默认Torch仍支持原采样 |
 | 构建 | `cuda_extension.py`按源码、PyTorch、Toolkit与目标设备生成hash，隔离Windows DLL/module路径；不自动删除旧进程可能正在使用的产物 |
 
@@ -134,7 +175,7 @@ runtime.close可重复调用，关闭后不再接受step；它不销毁runner的
 | Nano-vLLM本地 | `7074c1885c2e2e233822556cddde23044da40e82`，在上述版本上添加CPU测试、延迟导入和类型导入调整；GPU模型、attention和runner未改，不代表已适配Windows |
 | MiniVLLM upstream | [`00db3b477`](https://github.com/Wenyueh/MinivLLM/commit/00db3b477f33be1de91400483ae7d210c4d61868)；源码依据`git show REV:path`，不使用该checkout中未提交的Windows/Graph改动冒充upstream |
 | MiniVLLM本地Windows分支 | [`59466f60`](https://github.com/dandan20031031/MinivLLM/commit/59466f60ac82d388b2cfd8d9805a2090c33fd7a1)，增加gloo单进程回退、Windows/sm_120依赖与Graph修复；不是upstream原样执行。该checkout的README另有未提交编辑，不纳入源码结论 |
-| 本项目 | 结构维护后的`c9376f6b`；以本报告中的模型、后端和生命周期接口为准 |
+| 本项目 | 结构维护基线`c9376f6b`，叠加本轮packed/paged prefill与选择性LM head；以本报告中的接口与ragged验收摘要为准 |
 
 ### 按实际计算与资源路径比较
 
@@ -142,22 +183,22 @@ runtime.close可重复调用，关闭后不再接受step；它不销毁runner的
 |---|---|---|---|
 | 模型执行与投影 | 自有Qwen3 forward，默认合并QKV与Gate/Up；[`Qwen3模型`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/models/qwen3.py#L42) | 自有Qwen3/Llama模型和合并投影；[`模型入口`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/engine/model_runner.py#L29) | 原生dense Qwen3；QKV、Gate/Up融合可选，保留未融合与reference对拍路径 |
 | 权重加载 | 直接逐safetensors文件/参数加载，参数上的loader处理融合和TP；[`loader`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/utils/loader.py#L12) | 直接读safetensors，但先收集CPU权重字典，再映射/拼接；[`loader`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/utils/loader.py#L54) | HF加载浮点模型后通过meta/assign复用参数storage；尚无独立低峰值分片加载器 |
-| Prefill与decode attention | Triton写KV；prefill调用外部FlashAttention varlen，decode调用其paged KV接口；[`Attention.forward`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L59) | 自有Triton varlen prefill与paged decode；[`Attention.forward`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/layers/attention.py#L493)；不是调用相同外部FlashAttention库 | Windows CUDA paged decode、CUDA KV写入；prefill可选Torch、自有correctness CUDA或dandan dense Flash，接口与覆盖范围不同 |
-| Ragged与chunked prefill | flatten多个请求，准备cu_seqlens和绝对位置；支持chunked prefill，缓存命中时提供block tables；[`prepare_prefill`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L129) | 支持多请求flatten的varlen prefill；调度仍要求整条prompt满足token预算，所读版本无chunk进度协议；[`prepare_prefill`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/engine/model_runner.py#L265) | chunk进度、绝对位置与Prefix suffix计算已完成；每个请求的chunk仍分别forward，尚无真正ragged batched prefill |
+| Prefill与decode attention | Triton写KV；prefill调用外部FlashAttention varlen，decode调用其paged KV接口；[`Attention.forward`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L59) | 自有Triton varlen prefill与paged decode；[`Attention.forward`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/layers/attention.py#L493)；不是调用相同外部FlashAttention库 | Windows CUDA paged decode与flat KV写入；CUDA prefill已直接读paged历史，其他后端逐请求dense attention；不等同外部varlen Flash |
+| Ragged与chunked prefill | flatten多个请求，准备cu_seqlens和绝对位置；支持chunked prefill，缓存命中时提供block tables；[`prepare_prefill`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L129) | 支持多请求flatten的varlen prefill；调度仍要求整条prompt满足token预算，所读版本无chunk进度协议；[`prepare_prefill`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/engine/model_runner.py#L265) | chunk进度接入PrefillBatch，投影/MLP合批；CUDA attention按请求边界直接paged执行，显式dense后端仍逐请求attention；完整Prefix命中留在batch外 |
 | 调度与显存压力 | prefill优先，有prefill则该轮不decode；decode缺页时preempt并回队重算；[`Scheduler`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L30) | prefill优先、prefill/decode分轮，decode压力下抢占；另有永久超容量/无进度保护；[`Scheduler`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/engine/scheduler.py#L21) | decode优先，剩余预算推进prefill；按最坏输出增长做保守准入，淘汰Prefix pin；无安全preemption/recompute |
 | Prefix真实语义 | chained xxhash、token复核与页引用；释放请求后可保留空闲页hash供后续复用；最后一block不直接当完整命中；[`BlockManager`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L35) | 有hash/refcount结构，但释放页时清token_ids，完成请求不能成为后续warm prefix；prefill只处理本轮新K/V，不能据metadata字段宣称完整paged prefix复用已验收；[`释放与约束`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/engine/block_manager.py#L59) | 独立PrefixCache、完整block tuple索引、LRU/refcount；缓存边界logits，精确命中可跳过forward；当前是线性最长前缀查找 |
 | CUDA Graph边界 | 按batch分桶捕获transformer hidden-state forward；LM head、随机采样在图外；[`run_model/capture`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L195) | upstream与Windows固定提交均为hidden-state Graph，LM head/采样在图外；Windows提交修正bucket选取、padding slot和capture初始化；[`Windows修复`](https://github.com/dandan20031031/MinivLLM/blob/59466f60ac82d388b2cfd8d9805a2090c33fd7a1/src/myvllm/engine/model_runner.py#L354) | batch与block表宽度分桶；捕获完整decode logits并可包含greedy sampling，固定metadata与独立scratch；prefill、CPU调度仍在图外 |
-| Prefill的LM head行数 | 每请求仅取最后hidden row再投影词表；[`ParallelLMHead`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/embed_head.py#L56) | 同样选择cu_seqlens_q标识的末行；[`ParallelLMHead`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/layers/embedding_head.py#L70) | 当前`NativeQwen3.forward`为所有query行产生vocab logits；生成通常只需末行和Prefix边界行，这是待优化差异 |
+| Prefill的LM head行数 | 每请求仅取最后hidden row再投影词表；[`ParallelLMHead`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/embed_head.py#L56) | 同样选择cu_seqlens_q标识的末行；[`ParallelLMHead`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/layers/embedding_head.py#L70) | 生成已选择末行与必要Prefix边界行；空选择不执行LM head；默认完整logits继续供reference和投机验证 |
 | 采样 | temperature softmax/exponential随机采样，所读SamplingParams明确拒绝greedy；[`采样约束`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/sampling_params.py#L4) | 同类compiled随机采样，所读版本也拒绝temperature=0；[`采样约束`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/sampling_parameters.py#L4) | greedy与Torch temperature/top-k/top-p；CUDA采样仅greedy。公平比较需明确采样适配，不能混用不同模式再比较输出一致性 |
 | 量化与服务范围 | 所读源码为浮点离线generate、TP与共享内存worker；未见INT4/FP8量化执行或OpenAI/SSE服务路径 | 所读源码为浮点离线引擎、Qwen3/Llama与TP；未见对应量化执行或OpenAI/SSE服务路径 | dandan W4A16实际计算、其他低比特reference；HTTP/SSE有界队列、取消/超时；单GPU，另有单请求greedy prompt lookup投机 |
 | Windows与依赖 | spawn启动，但TP1也无条件NCCL；强制Triton和flash-attn；[`runner`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L26)、[`依赖`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/pyproject.toml#L14) | upstream同样无条件NCCL，依赖含vllm；Windows分支增加gloo单进程回退和triton-windows/cu128配置，未移除Triton；[`upstream`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/engine/model_runner.py#L26)、[`Windows依赖`](https://github.com/dandan20031031/MinivLLM/blob/59466f60ac82d388b2cfd8d9805a2090c33fd7a1/pyproject.toml#L7) | Windows原生MSVC/Ninja CUDA，不依赖NCCL、Linux、WSL或Triton；dandan_ops是可选独立库 |
 
 上述对照不把“源码中存在分支”等同“已完成本机性能验收”。Nano-vLLM本地CPU测试提交不解决NCCL/attention依赖；MiniVLLM的upstream、Windows提交、其他Graph/benchmark工作树也不能合并成一个未注明版本的结果。性能测试记录被测commit、dirty diff、平台适配、后端与图内范围；对照依赖单独隔离，不作为本引擎新增运行依赖。
 
-### 直接得到的下一步优化
+### 源码对照后的落地与继续优化
 
-1. **Prefill选择性词表投影**：先增加可选的logits行选择接口。普通生成只计算最后query行；启用Prefix时再计算需要保存的完整block边界行。保持默认完整logits接口用于对拍，投机验证仍需其目标token行。分别验证prefill末行、非对齐Prefix边界、精确命中、chunk和生成一致性，再测TTFT与峰值显存。该优化尚未实现，不预先宣称加速比例。
-2. **Ragged batched prefill**：在现有chunk进度之上新增flatten执行批次、cu_seqlens、每请求绝对位置和KV写入映射，配套可读取paged历史的prefill后端。先验证不同prompt长度、prefix命中、跨页与取消，再比较吞吐。不能把当前逐请求chunk循环视为已经拥有这条执行路径。
+1. **Prefill选择性词表投影已落地**：保留默认完整logits接口，生成选择末行和必要Prefix边界行。继续分别计量行选择与合批收益，评估不同上下文、batch与词表投影尺寸；不从减少行数直接推导端到端倍率。
+2. **CUDA ragged/paged prefill已落地**：使用flatten queries、cu_seqlens、绝对位置和KV slots，直接读取历史页。其他后端仍逐请求dense attention；后续按profiling评估CUDA tile/融合、算子库varlen支持与更广形状，不把所有后端都标为相同覆盖。
 3. **控制比较变量**：两者均有投影融合、不同Graph范围和随机采样；先统一模型/dtype、token工作量、缓存冷暖与可解释的采样模式。性能结果放在验证报告；这里的架构取舍不替代benchmark。
 
 ## 与vLLM、SGLang的框架及源码对照
@@ -174,7 +215,7 @@ vLLM V1把请求处理、EngineCore调度、Executor/Worker和ModelRunner分层�
 |---|---|---|---|
 | 请求执行 | [`EngineCore.step/step_with_batch_queue`](https://github.com/vllm-project/vllm/blob/5f63ea461ccd567ece6f50dd3701430c0f321039/vllm/v1/engine/core.py#L657) 经Executor执行，支持非阻塞调用与在途批次 | [`Scheduler.event_loop_normal/overlap`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/managers/scheduler.py#L1995) 管接收、选批、执行与结果处理 | [`InferenceService._run`](../mini_engine/serving/service.py) 同步推进runtime；HTTP线程与GPU worker已经分开，但没有CPU调度与GPU批次执行的完整overlap |
 | 调度模型 | [`Scheduler.schedule`](https://github.com/vllm-project/vllm/blob/5f63ea461ccd567ece6f50dd3701430c0f321039/vllm/v1/core/sched/scheduler.py#L677) 以已计算token与目标token进度统一分配工作，并处理抢占/恢复 | [`PrefillAdder`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/managers/schedule_policy.py#L584) 管输入/chunk/KV等预算，ScheduleBatch支持内存检查与retract | [`Scheduler.schedule`](../mini_engine/engine/scheduler.py) 显式区分decode与prefill，虚拟预留最坏输出增长；设计简单、准入保守，无安全preemption/recompute |
-| 执行批次 | [`GPUModelRunner._prepare_inputs`](https://github.com/vllm-project/vllm/blob/5f63ea461ccd567ece6f50dd3701430c0f321039/vllm/v1/worker/gpu_model_runner.py#L1924) 构造扁平token/query与持久batch metadata | [`ScheduleBatch`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/managers/schedule_batch.py) 准备extend/decode，再转换为执行用ForwardBatch | [`NativeBatchRuntime`](../mini_engine/engine/runtime.py) decode真正成批，prefill chunks仍逐请求执行；需要补执行批次接口后才能做真正ragged prefill |
+| 执行批次 | [`GPUModelRunner._prepare_inputs`](https://github.com/vllm-project/vllm/blob/5f63ea461ccd567ece6f50dd3701430c0f321039/vllm/v1/worker/gpu_model_runner.py#L1924) 构造扁平token/query与持久batch metadata | [`ScheduleBatch`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/managers/schedule_batch.py) 准备extend/decode，再转换为执行用ForwardBatch | [`PrefillBatch`](../mini_engine/engine/batch.py)打包query chunks、绝对位置及页表，CUDA直接paged prefill；decode与prefill仍分开，dense attention后端仍逐请求执行 |
 | KV与Prefix索引 | [`KVCacheManager`](https://github.com/vllm-project/vllm/blob/5f63ea461ccd567ece6f50dd3701430c0f321039/vllm/v1/core/kv_cache_manager.py#L264) 用block hash和coordinator管理命中、分配与cache groups | [`RadixCache.match_prefix`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/mem_cache/radix_cache.py#L364) 用树段与锁引用管理共享前缀；[`ReqToTokenPool`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/mem_cache/memory_pool.py#L375) 分离请求地址与KV存储 | [`BlockManager`](../mini_engine/cache/block_manager.py) 管页所有权；[`PrefixCache`](../mini_engine/cache/prefix_cache.py) 用完整token tuple、线性最长前缀扫描与LRU。完整命中已实际跳过，不等于hash APC或RadixAttention实现 |
 | Graph策略 | [`CudagraphDispatcher`](https://github.com/vllm-project/vllm/blob/5f63ea461ccd567ece6f50dd3701430c0f321039/vllm/v1/cudagraph_dispatcher.py#L233) 按FULL/PIECEWISE/NONE、token数和uniform decode等条件选择模式 | [`DecodeCudaGraphRunner`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py#L844) 管eligibility、load_batch与执行；[`FullCudaGraphBackend`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/model_executor/runner_backend/full_cuda_graph_backend.py#L99) 管capture/replay | [`DecodeGraphBucket`](../mini_engine/engine/cuda_graph.py) 只覆盖一token decode，按batch和块表宽度分桶；固定metadata和独立scratch，支持greedy capture；prefill不在图中 |
 | 采样与后端契约 | [`Sampler`](https://github.com/vllm-project/vllm/blob/5f63ea461ccd567ece6f50dd3701430c0f321039/vllm/v1/sample/sampler.py#L129) 配合SamplingMetadata、独立采样接口及拒绝采样模块 | [`ModelRunner.init_attention_backends`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/model_executor/model_runner.py#L1096) 与attention registry分离prefill/decode后端能力 | [`sampling.py`](../mini_engine/sampling.py) 的CUDA路径仅argmax；[`dandan_backend.py`](../mini_engine/kernels/dandan_backend.py) 显式校验dtype/设备/contract，量化另有bridge。后端可选不等于所有精度/布局/Graph组合均支持 |
@@ -186,7 +227,7 @@ vLLM V1把请求处理、EngineCore调度、Executor/Worker和ModelRunner分层�
 ### 从源码对照得到的开发取舍
 
 1. **先清晰执行接口**：Chat与batch可继续有不同入口，但逐步共享输入准备、模型执行、采样及清理边界，减少两套循环的行为漂移。把调度决策与GPU执行metadata分开，不为此引入多进程Executor。
-2. **再做真正batched/ragged prefill**：调度输出明确每请求的query范围、绝对位置与KV页；配套attention和模型对拍。把多请求放进队列或把prompt切块，本身不算完成混合执行批次。
+2. **继续完善ragged执行边界**：已将query范围、绝对位置与KV页接入packed模型及CUDA paged prefill；下一步依据计量改进attention/metadata开销。prefill与decode仍是不同执行调用，不声称已复现工业框架的所有混合批次与overlap能力。
 3. **补强后端契约**：明确dense/paged、dtype/head_dim、suffix offset、Graph eligibility和workspace约束。`dandan_ops`仍独立演进，引擎在版本升级后重新验收，Graph不得沿用旧权重/路由捕获。
 4. **按证据决定索引与异步复杂度**：Prefix扫描成为CPU热点后再选block hash或radix；CPU/GPU overlap需要in-flight批次、取消、过期结果、buffer及KV最后使用时刻的协议，不能只把`.cpu()`改成non_blocking就算完成。
 5. **继续控制范围**：保留单卡dense、Windows原生和可解释的资源所有权；多GPU、PD分离、主机层级缓存及多模态保持后置。现有continuous batching、Prefix和Graph已形成闭环，适用范围与工业框架仍有明确差异。

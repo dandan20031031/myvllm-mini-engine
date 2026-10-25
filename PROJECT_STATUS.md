@@ -10,6 +10,8 @@
 | KV管理 | 分页tensor pool、跨页写入、引用计数、LRU、逻辑长度回退与物理尾页释放 |
 | Prefix | 完整block共享；命中跳过计算、边界logits复用，避免覆盖共享页 |
 | 调度 | continuous batching，decode优先、有token预算的chunked prefill，保守最大KV预留，取消与异常回收 |
+| Ragged prefill | 多请求query chunks打包，投影/Norm/MLP合批；自有CUDA直接读取paged历史KV，dense后端明确逐请求attention |
+| 选择性logits | CLI取prompt末行；runtime取完成prompt末行和必要Prefix边界行并集，默认forward仍保留全部query logits |
 | CUDA | FP16/BF16 PagedAttention（GQA/split-KV/D128向量化）、Norm/Residual/SwiGLU、Embedding/RoPE/KV scatter、causal suffix prefill、可选greedy argmax |
 | Graph与融合 | batch与CLI Chat decode Graph、图内greedy、固定pinned/GPU metadata、独立scratch；QKV与Gate/Up融合 |
 | 精度 | FP32/FP16/BF16；INT8/INT4/FP8 weight-only reference；可选dandan FP16 GEMM/Flash和W4A16 CUDA计算 |
@@ -38,9 +40,10 @@ HTTP: server -> cli/RunnerConfig -> serving.http -> InferenceService worker
 - `mini_engine/config.py`、`cli.py`：统一启动参数与静态组合校验；模型/硬件能力仍由runner检查，请求和服务限额留在各入口。
 - `mini_engine/model/native_runner.py`：加载权重、单请求生成、Chat Graph、创建batch会话；CLI直接走该生成循环，不经过batch scheduler。
 - `mini_engine/model/outputs.py`：native与Transformers reference共享`IncrementalGenerationResult`，结果字段不再依赖reference runner定义。
-- `mini_engine/engine/runtime.py`：decode优先，再执行未缓存prompt块；模型结果交给请求采样与状态更新。
+- `mini_engine/engine/runtime.py`：decode优先，再合并未缓存prompt chunks；选择完成请求/Prefix边界所需logits，完成prompt后才采样。
+- `mini_engine/engine/batch.py`：`PrefillBatch`保存packed query边界、绝对位置、分页表和flat KV写入槽，校验共享只读页与写入隔离。
 - `mini_engine/cache/`：block的物理所有权、完整prefix边界与KV tensor存储分离。
-- `mini_engine/model/native_qwen3.py`：单token直接paged decode；多token suffix按绝对位置causal验证。
+- `mini_engine/model/native_qwen3.py`：共享packed prefill与旧单请求接口；CUDA直接paged多query attention，其他后端逐请求dense attention；decode Graph路径保留。
 - `mini_engine/speculative.py`：将pending token与草稿一次送入目标，提交连续接受前缀，拒绝部分截断KV逻辑长度并归还尾页。
 - `mini_engine/serving/protocol.py`、`service.py`、`http.py`：分别负责请求协议/错误、单GPU worker/队列生命周期、HTTP连接/JSON/SSE；tokenizer、runtime、KV变更由worker处理。`mini_engine/server.py`保留启动入口和兼容导出。
 - `mini_engine/kernels/cuda_extension.py`：内容hash隔离Windows DLL构建；旧会话可继续加载旧DLL，新版本编译到不同路径。launch错误检查已恢复，Graph中只跳过会同步到CPU的tensor metadata检查。
@@ -63,7 +66,8 @@ batch benchmark、profiling和系统验证同样通过`finally`/执行会话调�
 
 设备：RTX5080 SM120，PyTorch2.9.1+cu128。项目CUDA使用Toolkit13.3；独立算子库此前用12.8构建。两者均须通过目标机回归，不能因为版本提示而忽略运行测试。
 
-- 最新全量403 passed、2 warnings；CUDA/Graph/HTTP实际执行，覆盖启动配置、兼容导入、创建失败回滚、关闭幂等、借用资源保护、Graph退休后页重用与插桩恢复。JUnit保存在`build/validation/structure_pytest.xml`。
+- 结构维护基线403 passed、2 warnings；CUDA/Graph/HTTP实际执行，覆盖启动配置、兼容导入、创建失败回滚、关闭幂等、借用资源保护、Graph退休后页重用与插桩恢复。JUnit保存在`build/validation/structure_pytest.xml`；不作为后续ragged实现的测试计数。
+- Ragged实现最终全量467 passed、2 warnings、无跳过；完整BF16 CUDA、FP16 dandan与W4A16重新通过chunk/Prefix/batch2/4 Graph验收，BF16另过HTTP/SSE。B1选择性LM head明显减少额外分配峰值，未观察到稳定延迟收益；FP16 B2的严格逐元素KV阈值仍未通过，多请求时间仅作探索，不发布正式倍率。见[本轮摘要](reports/ragged_prefill_summary.json)。
 - 本轮重新通过完整Qwen3-0.6B BF16分块/Prefix、batch2/4 eager/Graph与并发HTTP/SSE验收；所有会话关闭后页引用归零。原始记录为`build/validation/structure_system_validation.json`，不作为性能测量。
 - 完整Qwen3 BF16：64-token冷/热prefix的计算64→0，5-token后缀仅算5；共享页保持不变，完整/分块输出一致。
 - batch2/4 eager/Graph输出一致，capture真实执行；真实并发HTTP/SSE正常返回usage/DONE，关闭后KV引用全部为0。
@@ -79,9 +83,11 @@ batch benchmark、profiling和系统验证同样通过`finally`/执行会话调�
 
 ## 仍需完成
 
-结构维护回归已完成；接下来补两个主对照的共同离线adapter、选择性LM head评估，再深化ragged/paged prefill。Nano原版在当前Windows环境不可直接运行，Mini需固定本地修复分支及实际导入路径，不把历史数据当同条件实测。
+选择性LM head、packed projection/MLP与CUDA直接paged prefill已接入；其数值、资源及forward消融见[当前验证报告](reports/VALIDATION_AND_BENCHMARKS.md)与[ragged摘要](reports/ragged_prefill_summary.json)。精确Prefix命中不进入packed batch；未完成prompt不采样，无末行/Prefix边界需求时不调用LM head。Graph仍仅decode，full-logits接口继续供reference/投机验证使用。
 
-1. **真正ragged batched prefill、直接paged多query验证**：当前chunk仍逐请求执行，suffix需要gather KV。
+接下来补两个主对照的共同离线adapter与受控端到端计量。Nano原版在当前Windows环境不可直接运行，Mini需固定本地修复分支及实际导入路径，不把历史数据当同条件实测。
+
+1. **深化ragged后端与性能验收**：先扩展FP16形状相关误差与较长生成/质量验收，明确KV误差预算，保留严格失败记录；再做受控端到端测量。CUDA已直接paged多query；`auto/math/flash/dandan`的attention仍按请求dense执行，仅投影/MLP合批。按profiling决定attention分块/融合或算子库varlen支持；prefill与decode尚未统一为同一混合执行批次。
 2. **FP8/INT8 KV与FP8 GEMM**：定义scale、直接分页读取和模型误差；已有W4A16不能代表这些格式完成。
 3. **NVFP4/MXFP8**：尚无项目可用计算后端，保留reserved，不能用INT4冒充FP4。
 4. **更完整投机**：小draft、随机接受/校正分布、batch/Graph调度、EAGLE-3/DFlash训练型draft；现有接受率策略不是DeepInfer置信度实现。

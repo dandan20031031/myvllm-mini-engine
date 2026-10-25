@@ -184,7 +184,9 @@ class NativeQwen3Runner:
         ids = self.tokenizer.apply_chat_template(
             messages, tokenize=True, add_generation_prompt=True,
             enable_thinking=self.enable_thinking, return_tensors="pt",
-        )[0].to(self.cache.device)
+        )[0]
+        if not callable(getattr(self.model, "forward_prefill_batch", None)):
+            ids = ids.to(self.cache.device)
         required = ids.numel() + max_new_tokens - 1
         if required > self.model.config.max_position_embeddings:
             raise ValueError("prompt and output budget exceed context limit")
@@ -203,7 +205,10 @@ class NativeQwen3Runner:
             blocks = self.block_manager.allocate("single", required)
             self._sync()
             start = time.perf_counter()
-            logits = self.model(ids, self.cache, blocks)[-1:]
+            if callable(getattr(self.model, "forward_prefill_batch", None)):
+                logits = self.model(ids, self.cache, blocks, logits_rows=[ids.numel() - 1])
+            else:
+                logits = self.model(ids, self.cache, blocks)[-1:]
             position = ids.numel()
             reason = "length"
             bucket, next_token = None, None

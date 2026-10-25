@@ -62,7 +62,12 @@ def counted_prefill(model):
     """Runtime batched decode bypasses Module.__call__; this counts prompt work."""
     chunks = []
     def observe(module, args, kwargs):
-        chunks.append({"tokens": int(args[0].numel()), "position": int(kwargs.get("position", 0))})
+        batch = kwargs.get("prefill_batch")
+        if batch is None:
+            chunks.append({"tokens": int(args[0].numel()), "position": int(kwargs.get("position", 0))})
+        else:
+            chunks.extend({"tokens": length, "position": start}
+                          for length, start in zip(batch.query_lengths, batch.starts))
     handle = model.register_forward_pre_hook(observe, with_kwargs=True)
     try:
         yield chunks

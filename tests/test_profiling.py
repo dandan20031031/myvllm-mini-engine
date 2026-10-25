@@ -35,7 +35,8 @@ def test_annotations_restore_methods_and_preserve_outputs():
     assert "forward" not in vars(runtime.model.lm_head)
     assert "decode_step" not in vars(runtime)
     keys = {event.key for event in profile.key_averages()}
-    assert {"engine/schedule", "engine/prefill", "engine/decode", "engine/sampling", "op/linear"} <= keys
+    assert {"engine/schedule", "engine/prefill", "engine/decode", "engine/sampling", "op/linear",
+            "op/write_kv_cache_slots"} <= keys
     assert runtime.scheduler.block_manager.used_blocks == 0
 
 

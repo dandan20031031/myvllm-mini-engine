@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import torch
 
 from ..cache import PrefixCache
+from .batch import PrefillBatch
 from .cuda_graph import DecodeGraphManager
 from ..sampling import sample_next_token
 from .request import GenerationRequest, RequestState
@@ -228,8 +229,85 @@ class NativeBatchRuntime:
 
     @torch.inference_mode()
     def prefill_step(self, requests: list[GenerationRequest]) -> dict[str, int]:
-        """Execute reserved prompt ranges; emit only after the final chunk."""
+        """Pack scheduled prompt chunks; exact Prefix hits need no model call."""
         self._ensure_open()
+        if not requests:
+            return {}
+        if not callable(getattr(self.model, "forward_prefill_batch", None)):
+            # Small external/reference runners can retain the original model
+            # protocol. Native Qwen3 always uses the packed implementation.
+            return self._prefill_reference(requests)
+        try:
+            active = [request for request in requests if request.prefill_end > request.prefill_start]
+            logits_by_request = {}
+            if active:
+                batch = PrefillBatch.from_sequences(
+                    [request.prompt_token_ids[request.prefill_start:request.prefill_end] for request in active],
+                    [request.block_ids for request in active],
+                    [request.prefill_start for request in active],
+                    block_size=self.scheduler.block_manager.block_size,
+                    num_blocks=self.scheduler.block_manager.num_blocks, device=self.cache.device,
+                )
+                needed_rows, boundaries, last_rows = set(), {}, {}
+                for index, request in enumerate(active):
+                    start, end = request.prefill_start, request.prefill_end
+                    offset = batch.query_offsets[index]
+                    if end == request.prompt_len:
+                        row = offset + end - start - 1
+                        needed_rows.add(row)
+                        last_rows[request.request_id] = row
+                    boundary = end // batch.block_size * batch.block_size
+                    if self.enable_prefix_cache and boundary > start:
+                        row = offset + boundary - start - 1
+                        needed_rows.add(row)
+                        boundaries[request.request_id] = boundary, row
+                selected = sorted(needed_rows)
+                if len(active) == 1:
+                    request = active[0]
+                    # Preserve the public single-request hook/position contract.
+                    rows = self.model(batch.input_ids, self.cache, position=request.prefill_start,
+                                      prefill_batch=batch, logits_rows=selected)
+                else:
+                    rows = self.model.forward_prefill_batch(batch, self.cache, logits_rows=selected)
+                lookup = {row: index for index, row in enumerate(selected)}
+                for request in active:
+                    if request.request_id in boundaries:
+                        boundary, row = boundaries[request.request_id]
+                        slot = lookup[row]
+                        self.prefix_cache.insert(request.prompt_token_ids[:boundary], request.block_ids,
+                                                 next_logits=rows[slot:slot + 1])
+                    if request.request_id in last_rows:
+                        slot = lookup[last_rows[request.request_id]]
+                        logits_by_request[request.request_id] = rows[slot:slot + 1]
+            ready, logits = [], []
+            for request in requests:
+                if request.prefill_end < request.prompt_len:
+                    continue
+                row = logits_by_request.get(request.request_id)
+                if row is None:
+                    row = request.prefix_next_logits
+                if row is None:
+                    raise RuntimeError("an exact prefix hit requires matching boundary logits")
+                ready.append(request)
+                logits.append(row)
+            if not ready:
+                return {}
+            chosen = self._sample(torch.cat(logits, dim=0), ready).cpu().tolist()
+            result = {}
+            for request, token_id in zip(ready, chosen):
+                token_id = int(token_id)
+                self.scheduler.on_token(request, token_id, finished=token_id in self.eos_token_ids)
+                result[request.request_id] = token_id
+            return result
+        except Exception:
+            # A packed execution failure cannot safely be attributed to a row.
+            for request in requests:
+                if not request.is_finished:
+                    self.scheduler.abort(request.request_id)
+            raise
+
+    def _prefill_reference(self, requests):
+        """Compatibility protocol for non-native reference/test runners."""
         result: dict[str, int] = {}
         for request in requests:
             try:

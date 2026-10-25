@@ -1,5 +1,6 @@
 // Windows CUDA data movement kernels for Qwen3.
 #include <ATen/ATen.h>
+#include <ATen/MemoryOverlap.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAStream.h>
@@ -7,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <vector>
+#include <unordered_set>
 
 namespace {
 constexpr int THREADS = 256;
@@ -187,4 +189,62 @@ void write_kv_cache_batch_cuda(const at::Tensor& kc, const at::Tensor& vc, const
             k.data_ptr<at::BFloat16>(), v.data_ptr<at::BFloat16>(), batch, tables.size(1), block_size, kc.size(0), kc.size(2), kc.size(3));
     }
     check_launch_capture_safe(stream);
+}
+
+namespace {
+template <typename scalar_t>
+__global__ void kv_write_slots_kernel(scalar_t* kc, scalar_t* vc, const int64_t* slots,
+    const scalar_t* k, const scalar_t* v, int64_t tokens, int64_t capacity, int64_t width) {
+    const int64_t token = blockIdx.x;
+    if (token >= tokens) return;
+    const int64_t slot = slots[token];
+    if (slot < 0 || slot >= capacity) return;
+    for (int64_t d = threadIdx.x; d < width; d += THREADS) {
+        kc[slot * width + d] = k[token * width + d];
+        vc[slot * width + d] = v[token * width + d];
+    }
+}
+}
+
+void write_kv_cache_slots_cuda(const at::Tensor& kc, const at::Tensor& vc,
+    const at::Tensor& slots, const at::Tensor& k, const at::Tensor& v, bool validate) {
+    TORCH_CHECK(kc.is_cuda(), "packed KV cache must be CUDA");
+    const c10::cuda::CUDAGuard guard(kc.device());
+    for (const auto& tensor : {kc, vc, slots, k, v}) {
+        TORCH_CHECK(tensor.device() == kc.device() && tensor.is_contiguous(),
+                    "packed KV inputs must be contiguous and share CUDA device");
+    }
+    TORCH_CHECK(kc.dim()==4 && vc.sizes()==kc.sizes(), "packed KV cache shape mismatch");
+    for (int i=0; i<4; ++i) TORCH_CHECK(kc.size(i)>0, "packed KV cache must be nonempty");
+    TORCH_CHECK(k.dim()==3 && v.sizes()==k.sizes() && k.size(1)==kc.size(2) && k.size(2)==kc.size(3),
+                "packed key/value shape mismatch");
+    TORCH_CHECK(slots.dim()==1 && slots.numel()==k.size(0) && slots.scalar_type()==at::kLong,
+                "packed KV slots must be int64 [tokens]");
+    TORCH_CHECK(kc.scalar_type()==at::kHalf || kc.scalar_type()==at::kBFloat16, "packed KV requires FP16/BF16");
+    TORCH_CHECK(vc.scalar_type()==kc.scalar_type() && k.scalar_type()==kc.scalar_type() && v.scalar_type()==kc.scalar_type(),
+                "packed KV dtype mismatch");
+    TORCH_CHECK(k.size(0)<=2147483647, "too many packed KV rows");
+    if (validate) {
+        at::assert_no_overlap(kc, vc);
+        for (const auto& target : {kc, vc}) for (const auto& source : {k, v, slots}) at::assert_no_overlap(target, source);
+        auto host_slots = slots.to(at::kCPU);
+        const auto* data = host_slots.data_ptr<int64_t>();
+        std::unordered_set<int64_t> unique;
+        for (int64_t i=0; i<slots.numel(); ++i) {
+            TORCH_CHECK(data[i]>=0 && data[i]<kc.size(0)*kc.size(1), "packed KV slot out of range");
+            TORCH_CHECK(unique.insert(data[i]).second, "duplicate packed KV slots would race");
+        }
+    }
+    if (k.size(0)==0) return;
+    const auto stream = c10::cuda::getCurrentCUDAStream(kc.get_device()).stream();
+    if (kc.scalar_type()==at::kHalf) {
+        kv_write_slots_kernel<at::Half><<<static_cast<unsigned int>(k.size(0)), THREADS, 0, stream>>>(
+            kc.data_ptr<at::Half>(), vc.data_ptr<at::Half>(), slots.data_ptr<int64_t>(),
+            k.data_ptr<at::Half>(), v.data_ptr<at::Half>(), k.size(0), kc.size(0)*kc.size(1), kc.size(2)*kc.size(3));
+    } else {
+        kv_write_slots_kernel<at::BFloat16><<<static_cast<unsigned int>(k.size(0)), THREADS, 0, stream>>>(
+            kc.data_ptr<at::BFloat16>(), vc.data_ptr<at::BFloat16>(), slots.data_ptr<int64_t>(),
+            k.data_ptr<at::BFloat16>(), v.data_ptr<at::BFloat16>(), k.size(0), kc.size(0)*kc.size(1), kc.size(2)*kc.size(3));
+    }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

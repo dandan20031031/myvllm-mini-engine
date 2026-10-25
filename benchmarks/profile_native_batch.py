@@ -72,6 +72,7 @@ def instrument_runtime(runtime, *, nvtx=False, record=True, layers=False):
                 patch(bucket, "replay_metadata", "engine/graph_buffers_and_replay")
         for function in ("embedding_lookup", "rms_norm", "residual_rms_norm", "residual_add",
                          "silu_and_mul", "apply_rope_backend", "write_kv_cache_batch",
+                         "write_kv_cache_slots", "paged_prefill_attention",
                          "prefill_attention", "paged_attention"):
             patch(model_ops, function, "op/" + function)
         selected = []

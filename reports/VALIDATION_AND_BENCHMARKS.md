@@ -1,6 +1,64 @@
 # 系统验证与性能评测
 
-汇总既有验收与实验，并增加2026-10-25结构维护后的回归和真实模型验收。历史性能数据保留原版本及计时范围，本轮未重新测量性能。实现约束见 [推理引擎架构与实现](ARCHITECTURE.md)，全部数据索引见 [技术报告目录](README.md)。
+汇总既有验收与实验，以及2026-10-25结构维护、ragged prefill的回归和真实模型验收。历史性能数据保留原版本及计时范围。实现约束见 [推理引擎架构与实现](ARCHITECTURE.md)，全部数据索引见 [技术报告目录](README.md)。
+
+## 2026-10-25 Ragged Prefill验收
+
+新增`PrefillBatch`、打包模型入口、直接读取分页历史的CUDA prefill和按物理slot写KV；生产生成路径只计算prompt末行及必要Prefix边界的LM head。单请求默认完整logits接口和decode Graph保留。`auto/math/flash/dandan`合批投影/MLP，但attention仍逐请求执行dense接口，不代表接入varlen FlashAttention。
+
+最终全量 **467 passed、2 warnings、无跳过项**，`MINI_ENGINE_TEST_CUDA=1`；新kernel的FP16/BF16、GQA、非默认stream、8193-token历史、跨页/Prefix隔离，合批runtime的行映射、取消/异常与profiling恢复均实际执行。JUnit为`build/validation/ragged_pytest.xml`，warning仍为既有Toolkit版本提示和setuptools接口。安装包构建通过，包含`engine/batch.py`和新CUDA源码。
+
+完整Qwen3-0.6B BF16通过完整/16-token chunk、冷/热/部分Prefix、batch2/4 eager/Graph和真实并发HTTP/SSE验收。Prefix实际计算仍为64/0/5 tokens，共享KV不变，关闭后引用归零。原始记录为`build/validation/ragged_system_validation_bf16.json`。这些是正确性检查，不是性能结果。
+
+FP16 `dandan_cuda` Linear + dense dandan Flash，以及W4A16 + dense dandan Flash也重新通过完整模型chunk/Prefix/batch2/4 Graph验收，关闭后引用归零；这两组没有重跑HTTP，也不代表INT4与BF16质量相同。原始记录分别为`build/validation/ragged_system_validation_dandan_fp16.json`和`ragged_system_validation_w4a16.json`。CLI BF16、融合与Chat Graph的真实加载/生成同样通过；首次请求含冷启动，不作性能结论。
+
+新benchmark对同一模型、token与后端比较三种预建metadata的forward：逐请求完整logits、逐请求末行logits、整批末行logits。它排除调度、metadata准备、加载和分词，不测decode、生成TPS或HTTP；所有模式使用新的attention实现，不是旧源码快照对照。CUDA Event包含提交空隙，另报告同步wall time。实际结果和数值边界在本节后续记录及[紧凑摘要](ragged_prefill_summary.json)中列出。
+
+### FP16合批数值边界
+
+完整模型B2、query长度32/24的严格检查没有通过：阈值`atol=0.125, rtol=0.01`下，ragged相对逐请求的K/V最大绝对差约0.969/0.473，超限29/138个元素，各自总数1,605,632。末行logits最大差约0.032，三种执行路径的8-token独立greedy输出一致；只选择LM head行时，KV逐位相同。关闭projection fusion仍出现相同差异。
+
+将同一批FP16舍入后的权重上转FP32，用Torch/math路径对照：合批与逐请求logits差约3.43e-5，K/V最大差约7.82e-4/3.89e-4。FP16合批相对该oracle的最大KV误差没有高于FP16逐请求路径。这些结果支持形状相关舍入在模型内部被放大的解释，不能据此保证所有prompt和batch的输出一致，也未完成batch-invariant inference。
+
+保留原严格失败记录，不通过放宽阈值发布倍率。`--skip-kv-check`只允许探索性原始计时，整体标记`validation_incomplete`、`comparison_allowed=false`，倍率为null。完整诊断可复现：
+
+```powershell
+. .\scripts\enter_project.ps1
+.\.venv\Scripts\python benchmarks\diagnose_ragged_prefill.py --model models/Qwen3-0.6B --output build/validation/ragged_numeric_diagnostic.json
+```
+
+该诊断不是性能测量；短输出一致不替代更长序列、质量集或逐层误差验收。
+
+### 单请求选择性LM head：严格通过的forward测量
+
+RTX5080、Qwen3-0.6B FP16、CUDA prefill/数据/elementwise、cuBLAS Linear、融合QKV/GateUp；无量化、无Graph、无profiler。各模式预热2次、6次轮转测量，源码/后端指纹首尾一致。B1的KV、末行logits和greedy检查通过，选择性投影前后KV完全相同。
+
+| prompt tokens | 全query logits wall P50 | 只投影末行 wall P50 | 全query额外allocated峰值 | 末行额外allocated峰值 |
+|---:|---:|---:|---:|---:|
+| 32 | 10.01 ms | 10.32 ms | 9.41 MiB | 1.27 MiB |
+| 64 | 10.77 ms | 10.84 ms | 18.83 MiB | 2.53 MiB |
+| 128 | 12.15 ms | 13.63 ms | 38.56 MiB | 5.56 MiB |
+| 512 | 76.29 ms | 75.91 ms | 150.63 MiB | 21.13 MiB |
+
+本次没有观察到一致的延迟改善；收益主要是减少不需要的词表输出和额外分配峰值。这里的显存不含常驻模型/KV基线，也不是进程总占用。样本少、Windows GPU未证明独占，不把小幅波动当确定加速或回退。原始文件：`benchmarks/results/ragged_prefill_b1_strict_fp16.json`。
+
+### 多请求合批：仅探索性原始计时
+
+相同模型/后端、每模式6次轮转测量，显式`--skip-kv-check`。这些case的末行logits与greedy检查通过，但`comparison_allowed=false`，不发布正式倍率。
+
+| query lengths | 逐请求末行 wall P50 | 合批末行 wall P50 |
+|---|---:|---:|
+| 32 / 24 | 23.07 ms | 12.35 ms |
+| 32 / 24 / 16 / 8 | 48.59 ms | 15.04 ms |
+| 64 / 48 | 26.76 ms | 11.11 ms |
+| 64 / 48 / 32 / 16 | 49.34 ms | 11.83 ms |
+
+原始文件：`benchmarks/results/ragged_prefill_multi_exploratory_fp16.json`，状态`validation_incomplete`；首次严格失败保存在`benchmarks/results/ragged_prefill_fp16_strict_failed.json`。这些时间不测Prefix热命中、scheduler、TTFT、decode、生成TPS或服务吞吐，不能直接外推为端到端收益，也不是Nano-vLLM/MiniVLLM对照。
+
+```powershell
+.\.venv\Scripts\python benchmarks\benchmark_ragged_prefill.py --dtype fp16 --batch-sizes 1 --prompt-lengths 32 64 128 512 --warmup 2 --repetitions 6 --output benchmarks/results/ragged_prefill_b1_strict_fp16.json
+.\.venv\Scripts\python benchmarks\benchmark_ragged_prefill.py --dtype fp16 --batch-sizes 2 4 --prompt-lengths 32 64 --warmup 2 --repetitions 6 --skip-kv-check --output benchmarks/results/ragged_prefill_multi_exploratory_fp16.json
+```
 
 ## 2026-10-25结构维护验收
 

@@ -8,6 +8,8 @@
 
 脚本用临时wrapper标记`engine/prefix_lookup`、`schedule`、`prefill`、`decode`、`sampling`和Graph buffer/replay；模型算子标记`op/linear`、`rms_norm`、`apply_rope_backend`、`paged_attention`等。`--layers`将投影细分到具体层。退出与异常时恢复全部方法/函数，默认引擎不增加profiling开销。
 
+2026-10-25接入ragged prefill后，新增`op/write_kv_cache_slots`与`op/paged_prefill_attention`范围。CUDA路径可以据此检查packed KV写入、直接分页prefill的耗时；其他prefill后端仍显示每请求的dense attention调用。下方2026-10-24 trace数字保留历史范围，未用它们推断新路径的性能。
+
 - `--tool torch`：PyTorch Profiler，输出`trace.json`、`operators.txt`、`summary.json`。
 - `--tool nvtx`：仅NVTX标记，供Nsight采集；不与PyTorch Profiler竞争CUPTI。
 - `--cuda-profiler-api`：预热后调用cudaProfilerStart/Stop，限定外部采集窗口。

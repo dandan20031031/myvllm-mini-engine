@@ -79,3 +79,52 @@ def write_kv_cache_batch(key_cache, value_cache, block_tables, token_offsets, ke
         return
     from .cuda_extension import load_cuda_extension
     load_cuda_extension().write_kv_cache_batch(key_cache, value_cache, tables, offsets, key, value, block_size, validate)
+
+
+def write_kv_cache_slots(key_cache, value_cache, slot_mapping, key, value,
+                         *, backend="torch", validate=True):
+    """Scatter packed KV rows to unique physical ``page * block_size + offset`` slots.
+
+    ``validate=False`` trusts slot contents checked by the batch factory; shape,
+    dtype, device and cache layout checks remain active without a device sync.
+    """
+    _backend(backend)
+    if (key_cache.ndim != 4 or value_cache.shape != key_cache.shape
+            or any(size <= 0 for size in key_cache.shape)
+            or not key_cache.is_contiguous() or not value_cache.is_contiguous()):
+        raise ValueError("KV caches must be contiguous [pages, block_size, kv_heads, head_dim]")
+    if (key.ndim != 3 or key.shape != value.shape
+            or key.shape[1:] != key_cache.shape[2:]):
+        raise ValueError("packed key/value must be [tokens, kv_heads, head_dim] matching the cache")
+    if (slot_mapping.ndim != 1 or slot_mapping.numel() != key.shape[0]
+            or slot_mapping.dtype != torch.int64 or not slot_mapping.is_contiguous()):
+        raise ValueError("slot_mapping must be contiguous int64 [tokens]")
+    for tensor in (value_cache, slot_mapping, key, value):
+        if tensor.device != key_cache.device:
+            raise ValueError("packed KV tensors and slots must share the cache device")
+    if any(t.dtype != key_cache.dtype for t in (value_cache, key, value)):
+        raise ValueError("packed KV tensors must share the cache dtype")
+    if key_cache.dtype not in (torch.float32, torch.float16, torch.bfloat16):
+        raise ValueError("packed KV requires FP32/FP16/BF16")
+    if validate:
+        slots = slot_mapping.tolist()
+        capacity = key_cache.shape[0] * key_cache.shape[1]
+        if any(slot < 0 or slot >= capacity for slot in slots):
+            raise ValueError("KV slot is outside cache capacity")
+        if len(set(slots)) != len(slots):
+            raise ValueError("duplicate KV slots would race during scatter")
+        if (torch._C._overlaps(key_cache, value_cache)
+                or any(torch._C._overlaps(cache, source)
+                       for cache in (key_cache, value_cache) for source in (key, value, slot_mapping))):
+            raise ValueError("KV destinations and source tensors must not overlap")
+    if backend == "torch":
+        rows_k = key_cache.view(-1, *key_cache.shape[2:])
+        rows_v = value_cache.view(-1, *value_cache.shape[2:])
+        rows_k.index_copy_(0, slot_mapping, key)
+        rows_v.index_copy_(0, slot_mapping, value)
+        return
+    if key_cache.device.type != "cuda" or key_cache.dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError("CUDA packed KV writes require CUDA FP16/BF16")
+    from .cuda_extension import load_cuda_extension
+    load_cuda_extension().write_kv_cache_slots(
+        key_cache, value_cache, slot_mapping, key.contiguous(), value.contiguous(), False)

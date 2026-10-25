@@ -1,4 +1,4 @@
-"""Dense Qwen3 forward with SDPA prefill and project-owned paged decode.
+"""Dense Qwen3 with packed prefill and project-owned paged KV attention.
 
 HuggingFace is used only for loading configuration, weights and tokenizer.
 No Transformers model forward or past_key_values is used here.
@@ -10,12 +10,12 @@ import torch
 from torch import nn
 
 from ..cache import KVCachePool
-from ..kernels.data import apply_rope as apply_rope_backend, embedding_lookup, write_kv_cache_batch
+from ..kernels.data import apply_rope as apply_rope_backend, embedding_lookup, write_kv_cache_batch, write_kv_cache_slots
 from ..kernels.elementwise import residual_add, residual_rms_norm, rms_norm, silu_and_mul
 from ..kernels.linear import FusedLinear, make_linear
 from ..kernels.dandan_backend import DANDAN_LINEAR_BACKENDS, LINEAR_BACKENDS
 from ..kernels.paged import paged_attention
-from ..kernels.prefill import prefill_attention
+from ..kernels.prefill import paged_prefill_attention, prefill_attention
 
 
 @dataclass(frozen=True)
@@ -114,7 +114,9 @@ class Attention(nn.Module):
             v_raw.contiguous().view(x.shape[0], cfg.num_key_value_heads, cfg.head_dim),
         )
 
-    def forward(self, x, cos, sin, cache, block_ids, position, layer, backend, decode_backend):
+    def forward(self, x, cos, sin, cache, block_ids, position, layer, backend, decode_backend, *, prefill_batch=None):
+        if prefill_batch is not None:
+            return self._forward_prefill_batch(x, cos, sin, cache, prefill_batch, layer, backend)
         cfg = self.config
         length = x.shape[0]
         q, k, v = self._project_qkv(x)
@@ -144,6 +146,35 @@ class Attention(nn.Module):
             output = paged_attention(q, cache.key[layer], cache.value[layer], table, lengths,
                                      cache.shape.block_size, backend=decode_backend, validate=False)
         return self.o_proj(output.reshape(length, -1))
+
+    def _forward_prefill_batch(self, x, cos, sin, cache, batch, layer, backend):
+        q, k, v = self._project_qkv(x)
+        q, k = self.q_norm(q), self.k_norm(k)
+        rope_cos = cos if self.data_backend == "cuda" else cos.unsqueeze(1)
+        rope_sin = sin if self.data_backend == "cuda" else sin.unsqueeze(1)
+        q, k = apply_rope_backend(q, k, rope_cos, rope_sin, backend=self.data_backend, validate=False)
+        write_kv_cache_slots(cache.key[layer], cache.value[layer], batch.slot_mapping, k, v,
+                             backend=self.data_backend, validate=False)
+        if backend == "cuda":
+            output = paged_prefill_attention(q, cache.key[layer], cache.value[layer],
+                batch.cu_seqlens_q, batch.query_starts, batch.block_tables, batch.context_lens,
+                cache.shape.block_size, backend="cuda", validate=False)
+        else:
+            # Preserve strict flash/dandan selection. Their current interfaces
+            # are dense, so only projection/normalization/MLP are packed here.
+            chunks = []
+            for request, (start, length) in enumerate(zip(batch.starts, batch.query_lengths)):
+                left, right = batch.query_offsets[request:request + 2]
+                if start:
+                    keys, values = cache.gather(layer, batch.block_ids[request], start + length)
+                else:
+                    keys, values = k[left:right], v[left:right]
+                attention = prefill_attention(q[left:right].transpose(0, 1).unsqueeze(0),
+                    keys.transpose(0, 1).unsqueeze(0), values.transpose(0, 1).unsqueeze(0),
+                    backend, query_start=start)
+                chunks.append(attention.squeeze(0).transpose(0, 1))
+            output = torch.cat(chunks, dim=0)
+        return self.o_proj(output.reshape(x.shape[0], -1))
 
     def forward_decode_batch(self, x, cos, sin, cache, block_tables, positions, layer, decode_backend):
         cfg = self.config
@@ -211,8 +242,8 @@ class DecoderLayer(nn.Module):
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps, elementwise_backend)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps, elementwise_backend)
 
-    def forward(self, x, *args):
-        attention = self.self_attn(self.input_layernorm(x), *args)
+    def forward(self, x, *args, prefill_batch=None):
+        attention = self.self_attn(self.input_layernorm(x), *args, prefill_batch=prefill_batch)
         normalized, summed = residual_rms_norm(
             attention, x, self.post_attention_layernorm.weight,
             self.post_attention_layernorm.eps, backend=self.elementwise_backend,
@@ -316,17 +347,17 @@ class NativeQwen3(nn.Module):
                            cfg.head_dim, dtype=weight.dtype, device=weight.device)
 
     @torch.inference_mode()
-    def forward(self, input_ids, cache, block_ids, position=0):
+    def forward(self, input_ids, cache, block_ids=None, position=0, *, prefill_batch=None, logits_rows=None):
         """Unpadded prompt/suffix, or one paged decode token at any position.
 
         The caller must allocate/grow block_ids before calling. Position is the
         number of tokens already written, not the number of sampled outputs.
         """
-        if input_ids.ndim != 1 or input_ids.numel() == 0 or input_ids.dtype != torch.long:
+        if not isinstance(input_ids, torch.Tensor) or input_ids.ndim != 1 or input_ids.numel() == 0 or input_ids.dtype != torch.long:
             raise ValueError("input_ids must be a nonempty 1D int64 tensor")
         if not isinstance(position, int) or isinstance(position, bool) or position < 0:
             raise ValueError("position must be a nonnegative integer")
-        if position + input_ids.numel() > self.config.max_position_embeddings:
+        if prefill_batch is None and position + input_ids.numel() > self.config.max_position_embeddings:
             raise ValueError("request exceeds model context limit")
         cfg, shape = self.config, cache.shape
         if (shape.num_layers, shape.num_kv_heads, shape.head_dim) != (cfg.num_hidden_layers, cfg.num_key_value_heads, cfg.head_dim):
@@ -334,6 +365,17 @@ class NativeQwen3(nn.Module):
         weight = self.model.embed_tokens.weight
         if cache.device != weight.device or cache.dtype != weight.dtype:
             raise ValueError("cache must match model device and dtype")
+        if prefill_batch is not None or logits_rows is not None or position == 0 or input_ids.numel() > 1:
+            from ..engine.batch import PrefillBatch
+
+            if prefill_batch is None:
+                if block_ids is None:
+                    raise ValueError("prefill requires a block table")
+                prefill_batch = PrefillBatch.from_sequences([input_ids], [block_ids], [position],
+                    block_size=shape.block_size, num_blocks=shape.num_blocks, device=weight.device)
+            elif not isinstance(prefill_batch, PrefillBatch) or input_ids is not prefill_batch.input_ids:
+                raise ValueError("packed forward requires its PrefillBatch input_ids")
+            return self._forward_prefill_batch(prefill_batch, cache, logits_rows=logits_rows)
         x = embedding_lookup(weight, input_ids.to(weight.device), backend=self.data_backend, validate=False)
         inv_freq = 1.0 / (cfg.rope_theta ** (torch.arange(0, cfg.head_dim, 2, device=x.device).float() / cfg.head_dim))
         positions = torch.arange(position, position + x.shape[0], device=x.device).float()
@@ -341,6 +383,44 @@ class NativeQwen3(nn.Module):
         cos, sin = angles.cos().to(x.dtype).unsqueeze(1), angles.sin().to(x.dtype).unsqueeze(1)
         for index, layer in enumerate(self.model.layers):
             x = layer(x, cos, sin, cache, block_ids, position, index, self.prefill_backend, self.decode_backend)
+        return self.lm_head(self.model.norm(x))
+
+    def forward_prefill_batch(self, batch, cache, *, logits_rows=None):
+        """Run packed query chunks while preserving Module forward hooks.
+
+        CUDA prefill reads paged history directly. Dense flash/dandan and Torch
+        paths retain per-request attention with shared packed projections/MLP.
+        ``logits_rows`` selects packed query rows, preserving order/duplicates.
+        """
+        from ..engine.batch import PrefillBatch
+
+        if not isinstance(batch, PrefillBatch):
+            raise ValueError("batch must be a PrefillBatch")
+        return self(batch.input_ids, cache, prefill_batch=batch, logits_rows=logits_rows)
+
+    def _forward_prefill_batch(self, batch, cache, *, logits_rows):
+        cfg, weight = self.config, self.model.embed_tokens.weight
+        batch.validate(block_size=cache.shape.block_size, num_blocks=cache.shape.num_blocks,
+            device=weight.device, max_position_embeddings=cfg.max_position_embeddings, vocab_size=cfg.vocab_size)
+        rows = None
+        if logits_rows is not None:
+            from ..engine.batch import _integers
+
+            row_values = _integers(logits_rows, "logits_rows")
+            if any(row < 0 or row >= batch.num_tokens for row in row_values):
+                raise ValueError("logits_rows index is outside the packed query range")
+            rows = torch.tensor(row_values, device=weight.device, dtype=torch.int64)
+        x = embedding_lookup(weight, batch.input_ids, backend=self.data_backend, validate=False)
+        inv_freq = 1.0 / (cfg.rope_theta ** (torch.arange(0, cfg.head_dim, 2, device=x.device).float() / cfg.head_dim))
+        angles = batch.positions.to(dtype=torch.float32)[:, None] * inv_freq[None, :]
+        cos, sin = angles.cos().to(x.dtype), angles.sin().to(x.dtype)
+        for index, layer in enumerate(self.model.layers):
+            x = layer(x, cos, sin, cache, None, 0, index, self.prefill_backend, self.decode_backend,
+                      prefill_batch=batch)
+        if rows is not None:
+            if rows.numel() == 0:
+                return weight.new_empty((0, cfg.vocab_size))
+            x = x.index_select(0, rows)
         return self.lm_head(self.model.norm(x))
 
     @torch.inference_mode()

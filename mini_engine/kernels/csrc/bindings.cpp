@@ -5,6 +5,11 @@
 
 at::Tensor causal_prefill_cuda(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v);
 at::Tensor causal_prefill_suffix_cuda(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, int64_t query_start);
+at::Tensor paged_prefill_attention_cuda(const at::Tensor& q, const at::Tensor& kc,
+    const at::Tensor& vc, const at::Tensor& offsets, const at::Tensor& starts,
+    const at::Tensor& tables, const at::Tensor& lengths, int64_t block_size, bool validate);
+void write_kv_cache_slots_cuda(const at::Tensor& kc, const at::Tensor& vc,
+    const at::Tensor& slots, const at::Tensor& k, const at::Tensor& v, bool validate);
 
 at::Tensor embedding_lookup_cuda(const at::Tensor& weight, const at::Tensor& ids, bool validate);
 std::vector<at::Tensor> apply_rope_cuda(const at::Tensor& q, const at::Tensor& k,
@@ -207,4 +212,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("write_kv_cache_batch", &write_kv_cache_batch_checked, "FP16/BF16 batched paged KV scatter");
     m.def("causal_prefill", &causal_prefill_cuda, "FP16/BF16 causal prefill attention");
     m.def("causal_prefill_suffix", &causal_prefill_suffix_cuda, "FP16/BF16 offset causal suffix attention");
+    m.def("paged_prefill_attention", &paged_prefill_attention_cuda, "Packed queries with direct paged causal KV reads");
+    m.def("write_kv_cache_slots", &write_kv_cache_slots_cuda, "Packed KV scatter to unique physical slots");
 }

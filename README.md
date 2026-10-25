@@ -14,6 +14,8 @@ MiniQwenEngine 是一个面向 Qwen3-0.6B 的 Windows 11 单 GPU 推理引擎，
 - Paged KV Cache tensor pool，支持跨 block 写入、回收和引用计数；
 - Prefix Cache完整block共享、LRU、命中跳过计算和边界logits复用；
 - decode优先的chunked prefill、token预算与KV容量预留；
+- Ragged prefill：多个query chunks打包执行投影/MLP，CUDA attention直接读取paged历史KV；
+- 选择性LM head：生成只投影prompt末行及必要Prefix边界，保留完整logits参考接口；
 - 单请求CLI、多轮Chat、batch decode，以及Windows HTTP/SSE服务；
 - greedy prompt-lookup投机解码：多token验证、接受/拒绝与KV回退，可选接受率驱动draft预算。
 
@@ -23,6 +25,7 @@ MiniQwenEngine 是一个面向 Qwen3-0.6B 的 Windows 11 单 GPU 推理引擎，
 - CUDA RMSNorm、Residual + RMSNorm、Residual Add、SwiGLU 的 SiLU×Up；
 - CUDA Embedding gather、RoPE 和分页 KV 写入；
 - CUDA causal prefill，支持rectangular suffix与绝对位置causal mask；
+- CUDA packed/paged prefill与flat KV scatter，支持不同query长度、历史位置和非连续物理页；
 - 可选CUDA greedy argmax（稳定tie/NaN规则，支持Graph）；
 - 显式 CUDA Linear，底层使用 PyTorch 的 cuBLAS/cuBLASLt dispatch；
 - CUDA Graph decode bucket，支持固定 buffer、padding slot 和 replay；
@@ -145,6 +148,12 @@ Chat 中支持：
 
 `dandan` Linear 允许库按形状选择 cuBLAS/HGEMM/TMA；`dandan_cuda` 强制自研 HGEMM。W4A16 支持源 group64/128，转换后存储group64，保留原始对称量化值；embedding、LM head、Norm 和 KV 保持 FP16。Flash prefill 严格要求 CUDA FP16、head_dim=128，decode 继续使用引擎分页 kernel。
 
+### Ragged Prefill与选择性LM head
+
+HTTP/batch runtime会将同轮非空prompt chunks打包为`PrefillBatch`，无需新增启动参数。使用`--prefill-backend cuda`时，attention直接读取每请求的paged历史KV；不同长度、不同prefix位置的请求保持独立causal范围。`auto/math/flash/dandan`仍逐请求执行dense attention，投影/Norm/MLP合批，不能称为varlen Flash。decode优先与chunk预算保持原有行为，prefill不进入CUDA Graph。
+
+CLI普通生成只计算prompt末行的词表logits；batch runtime保留完成prompt末行及必要Prefix边界行。精确Prefix命中直接复用缓存logits；未完成prompt不采样，无logits需求的中间chunk跳过LM head。原单请求forward默认返回全部query logits，reference和投机验证接口继续可用。调用链及边界见[架构报告](reports/ARCHITECTURE.md)，验收与消融见[ragged摘要](reports/ragged_prefill_summary.json)。
+
 ### HTTP / SSE服务
 
 ```powershell
@@ -185,7 +194,7 @@ $env:MINI_ENGINE_TEST_CUDA = "1"
 .\.venv\Scripts\python -m pytest -q -o cache_dir=build/pytest_cache
 ```
 
-2026-10-25本机全量回归为`403 passed, 2 warnings`，CUDA与HTTP测试实际执行；本轮重新验证完整0.6B BF16的分块/共享前缀、batch2/4 eager/Graph与并发HTTP/SSE，关闭后页引用归零。FP16 dandan和W4A16完整模型的既有验收记录保留原范围，详见[系统验证与性能评测](reports/VALIDATION_AND_BENCHMARKS.md)。后端数值验收可运行：
+当前全量`467 passed, 2 warnings`，CUDA实际执行、无跳过项。完整Qwen3-0.6B的BF16 CUDA、FP16 dandan及W4A16通过chunk/Prefix/batch2/4 Graph验收，BF16另过HTTP/SSE；关闭后页引用归零。FP16合批仍有严格逐元素KV误差超限，短样例输出一致不代表batch invariance，详见[系统验证与性能评测](reports/VALIDATION_AND_BENCHMARKS.md)及[紧凑摘要](reports/ragged_prefill_summary.json)。后端数值验收可运行：
 
 ```powershell
 .\.venv\Scripts\python benchmarks\validate_dandan_qwen3.py `
@@ -195,7 +204,7 @@ $env:MINI_ENGINE_TEST_CUDA = "1"
 
 该验收区分量化变化和相同权重下的kernel误差。INT4可能改变模型输出，仍需评估任务质量。
 
-启动配置、服务分层、资源清理与安装包检查的本轮证据见[结构维护验收摘要](reports/structure_validation_summary.json)。本轮未重新测量性能，不从结构调整推导加速比。
+启动配置、服务分层、资源清理与安装包检查的证据见[结构维护验收摘要](reports/structure_validation_summary.json)。该结构维护轮未重新测量性能；后续ragged消融单独记录，不从模块整理推导加速比。
 
 ## 性能 Benchmark
 
@@ -291,11 +300,17 @@ median TPOT: 约 20–21 ms/token
 | CUDA Graph | 175.15 ms | 473.87 tokens/s |
 | Projection Fusion + CUDA Graph | 159.88 ms | 519.15 tokens/s |
 
-配置为 BF16、3 条请求、32 token 输出预算、`block_size=16`。这些数字包含逐请求 prefill 和 scheduler 生命周期，不是只统计 decode kernel，也不是 vLLM/MiniVLLM 的同口径最终对比。
+配置为 BF16、3 条请求、32 token 输出预算、`block_size=16`。这些历史数字包含当时的逐请求prefill和scheduler生命周期，不代表本轮ragged实现；不是只统计decode kernel，也不是跨引擎同口径最终对比。
 
 结果文件默认被 `.gitignore` 排除，避免把机器相关 benchmark JSON 和模型路径提交到公开仓库。
 
 新后端对照可添加 `--dtype fp16 --fuse-projections --ignore-eos --prefix-cache disabled`，再分别选择 Linear/Prefill/量化后端。脚本记录实际输出token、重复样本P95及算子库文件指纹变化。本轮dandan性能样本受到GPU并发负载和库文件修改影响，不能与上表混算加速比；可提交数值摘要见 [验证记录](reports/stage22_backend_validation_summary.json)。
+
+### Prefill行选择与合批
+
+RTX5080、FP16、融合投影、CUDA prefill、cuBLAS Linear的单请求forward消融中，512-token prompt只投影末行后，额外allocated显存峰值从150.63降到21.13 MiB；P50 wall time为76.29→75.91ms。32/64/128-token样例没有一致延迟改善，本次收益主要是减少额外分配。
+
+多请求合批已有探索性原始时间，但FP16 B2严格KV逐元素阈值未通过，因此不发布正式倍率；8-token输出一致不能替代完整数值或质量验收。上述测量排除metadata准备、scheduler、decode和HTTP，不是生成TPS或端到端加速。方法、全部case与数值诊断见[Prefill验证报告](reports/VALIDATION_AND_BENCHMARKS.md)和[benchmark入口](benchmarks/README.md)。
 
 ### 共享前缀、投机与HTTP对照
 
@@ -313,7 +328,7 @@ HTTP工具记录实际usage、TTFT、TPOT估计、P50/P95、失败和吞吐；st
 
 主对照为[GeeeekExplorer/nano-vllm](https://github.com/GeeeekExplorer/nano-vllm)和[Wenyueh/MinivLLM](https://github.com/Wenyueh/MinivLLM)，两者都比较源码结构与性能；vLLM/SGLang保留为工业架构参考。
 
-- 架构：两者已有ragged prefill与抢占重算；本项目仍逐请求执行prompt chunks，但已有Windows CUDA、完整Prefix复用、可选W4A16、HTTP/SSE和显式资源关闭。具体差异与固定源码见[架构报告](reports/ARCHITECTURE.md)。
+- 架构：两者已有ragged prefill与抢占重算；本项目已接入packed projection/MLP、选择性LM head与直接paged CUDA prefill，并有完整Prefix复用、可选W4A16、HTTP/SSE和显式资源关闭。dense后端仍逐请求attention；无preemption。具体差异与固定源码见[架构报告](reports/ARCHITECTURE.md)。
 - 性能：尚无三方同条件排名。Mini历史Graph的590.1/1304.6/1890.8 TPS是实际FP32、batch3/8/16；本项目342–358 TPS是FP16单请求；Nano官方结果来自4070 Laptop。精度、批量和计时边界不同，不能相除。
 - 复测：统一模型哈希、实际dtype、prompt token IDs、输出长度、sampling、Graph与缓存状态，再统计TTFT/TPOT、聚合TPS和显存。协议与平台限制见[性能评测报告](reports/VALIDATION_AND_BENCHMARKS.md)及[benchmark目录](benchmarks/README.md)。
 
@@ -335,7 +350,7 @@ mini_engine/
 ├── cli.py          两个入口共享的模型启动参数与配置转换
 ├── config.py       RunnerConfig 静态约束；QuantConfig 精度约定
 ├── cache/          Paged KV Cache、block allocator、prefix cache
-├── engine/         scheduler、request、batch runtime、CUDA Graph buckets
+├── engine/         scheduler、request、PrefillBatch metadata、runtime、decode Graph
 ├── kernels/        PyTorch fallback、CUDA dispatch 和 .cu 源码
 ├── model/          Qwen3 forward、runner 和公共生成结果 outputs.py
 ├── quantization/   INT8/INT4/FP8 reference 与 dandan W4A16 bridge
@@ -354,7 +369,7 @@ PROJECT_STATUS.md   当前项目总览、已实现能力和后续方向
 
 ## 当前限制
 
-- chunked prefill已完成；多个请求的prompt尚未打包为同一ragged batch，suffix验证仍需gather KV；
+- CUDA已支持ragged/paged多query prefill；`auto/math/flash/dandan`的attention仍逐请求dense执行，尚无算子库varlen Flash或统一prefill/decode混合执行批次；
 - Prefix只复用完整block；为防止KV耗尽采用保守最大预算预留，尚无preemption；
 - CUDA Graph 覆盖单请求/Chat与batch的一token decode和greedy采样；prefill、CPU调度、EOS判断与文本处理在图外，非greedy batch采样也在图外；
 - W4A16 已有可选 CUDA 后端，量化质量和多形状性能仍需评估；FP8 GEMM、FP8/INT8 KV、NVFP4/MXFP8 尚未完成；
