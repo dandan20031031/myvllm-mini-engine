@@ -47,7 +47,7 @@ HTTP: server -> cli/RunnerConfig -> serving.http -> InferenceService worker
 
 技术报告按主题整理，入口见 [技术报告目录](reports/README.md)：[推理引擎架构与实现](reports/ARCHITECTURE.md)、[系统验证与性能评测](reports/VALIDATION_AND_BENCHMARKS.md)、[算子后端性能复核](reports/BACKEND_PERFORMANCE_RECHECK.md)和[推理引擎性能分析指南](reports/PROFILING.md)；原始JSON实验摘要保留。
 
-2026-10-25已补vLLM/SGLang固定commit的架构与源码对照：请求执行、调度进度、执行批次、KV/Prefix、Graph和后端契约，结论并入架构报告。性能对照收敛为MiniVLLM；下一步重点是共享执行接口、真正ragged prefill与后端能力边界，尚未因此实现新的异步/多进程执行器。
+2026-10-25主对照调整为Nano-vLLM与MiniVLLM，同时比较架构和性能；已固定源码并核对ragged prefill、抢占、prefix、Graph边界、加载、采样和Windows适配。vLLM/SGLang源码对照保留为工业参考。当前没有三方同条件实测排名，详情并入架构与性能主题报告。
 
 ## 2026-10-25：结构维护与资源所有权
 
@@ -79,12 +79,12 @@ batch benchmark、profiling和系统验证同样通过`finally`/执行会话调�
 
 ## 仍需完成
 
-结构维护回归已完成；接下来优先补执行批次接口与同条件MiniVLLM对照，再按实际瓶颈选择下面的一条功能路线深化。
+结构维护回归已完成；接下来补两个主对照的共同离线adapter、选择性LM head评估，再深化ragged/paged prefill。Nano原版在当前Windows环境不可直接运行，Mini需固定本地修复分支及实际导入路径，不把历史数据当同条件实测。
 
 1. **真正ragged batched prefill、直接paged多query验证**：当前chunk仍逐请求执行，suffix需要gather KV。
 2. **FP8/INT8 KV与FP8 GEMM**：定义scale、直接分页读取和模型误差；已有W4A16不能代表这些格式完成。
 3. **NVFP4/MXFP8**：尚无项目可用计算后端，保留reserved，不能用INT4冒充FP4。
 4. **更完整投机**：小draft、随机接受/校正分布、batch/Graph调度、EAGLE-3/DFlash训练型draft；现有接受率策略不是DeepInfer置信度实现。
 5. **服务生产能力**：目前greedy聊天子集，无tools/多模态/安全网关；服务执行错误可中止整个active batch。异步调度、preemption、随机CUDA采样尚待完成。
-6. **MiniVLLM性能与质量集**：补同机、同精度、同负载的MiniVLLM对照和固定质量集；vLLM/SGLang只做架构、模块边界和源码机制对照，取消性能跑分交付。HTTP工具保留为通用能力，DeepInfer不纳入Qwen3速度排名。
+6. **Nano-vLLM/MiniVLLM性能与质量集**：补同机、同精度、同负载的离线对照；目前Mini历史实际FP32批量、Nano官方4070 Laptop与本项目FP16单请求不能排名。首轮共同temperature=0.6、固定输出长度，greedy适配另行披露；HTTP服务单独测。vLLM/SGLang和DeepInfer只作结构/机制参考，不纳入速度排名。
 7. **工具验证**：新kernel尚未做compute-sanitizer memcheck/racecheck；数值/Graph测试不能替代。

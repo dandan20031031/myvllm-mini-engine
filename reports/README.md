@@ -6,8 +6,8 @@
 
 | 报告 | 保留内容 |
 |---|---|
-| [推理引擎架构与实现](ARCHITECTURE.md) | CLI/HTTP实际调用链、RunnerConfig与共享启动参数、服务三层职责、输出类型、close所有权，以及Prefix/chunk/Graph/CUDA/量化/投机；含vLLM/SGLang固定commit源码对照 |
-| [系统验证与性能评测](VALIDATION_AND_BENCHMARKS.md) | 已执行验收、关键实验条件与结果、计时定义、复现入口和未完成项 |
+| [推理引擎架构与实现](ARCHITECTURE.md) | CLI/HTTP调用链与资源所有权；Nano-vLLM/MiniVLLM主要源码对照，vLLM/SGLang工业参考；Prefix/chunk/Graph/CUDA/量化/投机 |
+| [系统验证与性能评测](VALIDATION_AND_BENCHMARKS.md) | 已执行验收与历史数据，Nano-vLLM/MiniVLLM计量协议、平台阻碍及当前不可比较条件；没有三方速度排名 |
 | [算子后端性能复核](BACKEND_PERFORMANCE_RECHECK.md) | 2026-10-24 FP16/W4A16原始观察、基线漂移、显存与输出差异 |
 | [推理引擎性能分析指南](PROFILING.md) | 真实eager/Graph热点、PyTorch/NVTX/Nsight命令与采集限制 |
 
@@ -19,6 +19,7 @@ JSON保留原文件名与内容，便于追溯原实验。它们是对应日期�
 
 | 文件 | 用途 |
 |---|---|
+| [nano_mini_comparison_summary.json](nano_mini_comparison_summary.json) | 2026-10-25两个主对照的固定版本、历史性能来源/条件、源码与报告哈希、Windows可行性；不是新增跑分 |
 | [structure_validation_summary.json](structure_validation_summary.json) | 2026-10-25结构维护：403项回归、真实BF16 chunk/prefix/Graph/HTTP-SSE、资源归还和wheel检查 |
 | [stage07_elementwise_summary.json](stage07_elementwise_summary.json) | FP16/BF16 elementwise算子、Graph与eager测量 |
 | [stage22_backend_validation_summary.json](stage22_backend_validation_summary.json) | FP16/W4A16与同权重oracle的短序列数值对拍 |

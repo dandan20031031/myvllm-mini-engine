@@ -124,9 +124,45 @@ runtime.close可重复调用，关闭后不再接受step；它不销毁runner的
 
 `benchmark_native_batch.py`、`profile_native_batch.py`与`validate_system_extensions.py`也采用相同关闭接口，不再操作Graph scratch的内部owner名称。benchmark重复间仍清空Prefix以固定工作量，最终close在计时之外；profiler先退出插桩上下文、恢复方法和hook，再关闭runtime。注入构造、分词、执行错误的回归验证了这些边界。
 
+## 与Nano-vLLM、MiniVLLM的主要对照
+
+两者同时作为**架构、源码与性能对照对象**。功能对照基于固定提交的实际执行分支；性能另按模型、硬件、dtype、KV预算、输入token、采样与计时边界验收，不能从README吞吐或同名功能推导速度结论。
+
+| 对照版本 | 固定依据与本地差异 |
+|---|---|
+| Nano-vLLM upstream | [`bb823b3e`](https://github.com/GeeeekExplorer/nano-vllm/commit/bb823b3e06983d71485a8e1f23715ebd87d98ef8)，本地`nano-vllm`的`origin/main`快照；不是滚动latest声明 |
+| Nano-vLLM本地 | `7074c1885c2e2e233822556cddde23044da40e82`，在上述版本上添加CPU测试、延迟导入和类型导入调整；GPU模型、attention和runner未改，不代表已适配Windows |
+| MiniVLLM upstream | [`00db3b477`](https://github.com/Wenyueh/MinivLLM/commit/00db3b477f33be1de91400483ae7d210c4d61868)；源码依据`git show REV:path`，不使用该checkout中未提交的Windows/Graph改动冒充upstream |
+| MiniVLLM本地Windows分支 | [`59466f60`](https://github.com/dandan20031031/MinivLLM/commit/59466f60ac82d388b2cfd8d9805a2090c33fd7a1)，增加gloo单进程回退、Windows/sm_120依赖与Graph修复；不是upstream原样执行。该checkout的README另有未提交编辑，不纳入源码结论 |
+| 本项目 | 结构维护后的`c9376f6b`；以本报告中的模型、后端和生命周期接口为准 |
+
+### 按实际计算与资源路径比较
+
+| 对照点 | Nano-vLLM固定版本 | MiniVLLM固定版本 | 本项目当前实现 |
+|---|---|---|---|
+| 模型执行与投影 | 自有Qwen3 forward，默认合并QKV与Gate/Up；[`Qwen3模型`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/models/qwen3.py#L42) | 自有Qwen3/Llama模型和合并投影；[`模型入口`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/engine/model_runner.py#L29) | 原生dense Qwen3；QKV、Gate/Up融合可选，保留未融合与reference对拍路径 |
+| 权重加载 | 直接逐safetensors文件/参数加载，参数上的loader处理融合和TP；[`loader`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/utils/loader.py#L12) | 直接读safetensors，但先收集CPU权重字典，再映射/拼接；[`loader`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/utils/loader.py#L54) | HF加载浮点模型后通过meta/assign复用参数storage；尚无独立低峰值分片加载器 |
+| Prefill与decode attention | Triton写KV；prefill调用外部FlashAttention varlen，decode调用其paged KV接口；[`Attention.forward`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L59) | 自有Triton varlen prefill与paged decode；[`Attention.forward`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/layers/attention.py#L493)；不是调用相同外部FlashAttention库 | Windows CUDA paged decode、CUDA KV写入；prefill可选Torch、自有correctness CUDA或dandan dense Flash，接口与覆盖范围不同 |
+| Ragged与chunked prefill | flatten多个请求，准备cu_seqlens和绝对位置；支持chunked prefill，缓存命中时提供block tables；[`prepare_prefill`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L129) | 支持多请求flatten的varlen prefill；调度仍要求整条prompt满足token预算，所读版本无chunk进度协议；[`prepare_prefill`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/engine/model_runner.py#L265) | chunk进度、绝对位置与Prefix suffix计算已完成；每个请求的chunk仍分别forward，尚无真正ragged batched prefill |
+| 调度与显存压力 | prefill优先，有prefill则该轮不decode；decode缺页时preempt并回队重算；[`Scheduler`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L30) | prefill优先、prefill/decode分轮，decode压力下抢占；另有永久超容量/无进度保护；[`Scheduler`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/engine/scheduler.py#L21) | decode优先，剩余预算推进prefill；按最坏输出增长做保守准入，淘汰Prefix pin；无安全preemption/recompute |
+| Prefix真实语义 | chained xxhash、token复核与页引用；释放请求后可保留空闲页hash供后续复用；最后一block不直接当完整命中；[`BlockManager`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L35) | 有hash/refcount结构，但释放页时清token_ids，完成请求不能成为后续warm prefix；prefill只处理本轮新K/V，不能据metadata字段宣称完整paged prefix复用已验收；[`释放与约束`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/engine/block_manager.py#L59) | 独立PrefixCache、完整block tuple索引、LRU/refcount；缓存边界logits，精确命中可跳过forward；当前是线性最长前缀查找 |
+| CUDA Graph边界 | 按batch分桶捕获transformer hidden-state forward；LM head、随机采样在图外；[`run_model/capture`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L195) | upstream与Windows固定提交均为hidden-state Graph，LM head/采样在图外；Windows提交修正bucket选取、padding slot和capture初始化；[`Windows修复`](https://github.com/dandan20031031/MinivLLM/blob/59466f60ac82d388b2cfd8d9805a2090c33fd7a1/src/myvllm/engine/model_runner.py#L354) | batch与block表宽度分桶；捕获完整decode logits并可包含greedy sampling，固定metadata与独立scratch；prefill、CPU调度仍在图外 |
+| Prefill的LM head行数 | 每请求仅取最后hidden row再投影词表；[`ParallelLMHead`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/embed_head.py#L56) | 同样选择cu_seqlens_q标识的末行；[`ParallelLMHead`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/layers/embedding_head.py#L70) | 当前`NativeQwen3.forward`为所有query行产生vocab logits；生成通常只需末行和Prefix边界行，这是待优化差异 |
+| 采样 | temperature softmax/exponential随机采样，所读SamplingParams明确拒绝greedy；[`采样约束`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/sampling_params.py#L4) | 同类compiled随机采样，所读版本也拒绝temperature=0；[`采样约束`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/sampling_parameters.py#L4) | greedy与Torch temperature/top-k/top-p；CUDA采样仅greedy。公平比较需明确采样适配，不能混用不同模式再比较输出一致性 |
+| 量化与服务范围 | 所读源码为浮点离线generate、TP与共享内存worker；未见INT4/FP8量化执行或OpenAI/SSE服务路径 | 所读源码为浮点离线引擎、Qwen3/Llama与TP；未见对应量化执行或OpenAI/SSE服务路径 | dandan W4A16实际计算、其他低比特reference；HTTP/SSE有界队列、取消/超时；单GPU，另有单请求greedy prompt lookup投机 |
+| Windows与依赖 | spawn启动，但TP1也无条件NCCL；强制Triton和flash-attn；[`runner`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L26)、[`依赖`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/pyproject.toml#L14) | upstream同样无条件NCCL，依赖含vllm；Windows分支增加gloo单进程回退和triton-windows/cu128配置，未移除Triton；[`upstream`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/engine/model_runner.py#L26)、[`Windows依赖`](https://github.com/dandan20031031/MinivLLM/blob/59466f60ac82d388b2cfd8d9805a2090c33fd7a1/pyproject.toml#L7) | Windows原生MSVC/Ninja CUDA，不依赖NCCL、Linux、WSL或Triton；dandan_ops是可选独立库 |
+
+上述对照不把“源码中存在分支”等同“已完成本机性能验收”。Nano-vLLM本地CPU测试提交不解决NCCL/attention依赖；MiniVLLM的upstream、Windows提交、其他Graph/benchmark工作树也不能合并成一个未注明版本的结果。性能测试记录被测commit、dirty diff、平台适配、后端与图内范围；对照依赖单独隔离，不作为本引擎新增运行依赖。
+
+### 直接得到的下一步优化
+
+1. **Prefill选择性词表投影**：先增加可选的logits行选择接口。普通生成只计算最后query行；启用Prefix时再计算需要保存的完整block边界行。保持默认完整logits接口用于对拍，投机验证仍需其目标token行。分别验证prefill末行、非对齐Prefix边界、精确命中、chunk和生成一致性，再测TTFT与峰值显存。该优化尚未实现，不预先宣称加速比例。
+2. **Ragged batched prefill**：在现有chunk进度之上新增flatten执行批次、cu_seqlens、每请求绝对位置和KV写入映射，配套可读取paged历史的prefill后端。先验证不同prompt长度、prefix命中、跨页与取消，再比较吞吐。不能把当前逐请求chunk循环视为已经拥有这条执行路径。
+3. **控制比较变量**：两者均有投影融合、不同Graph范围和随机采样；先统一模型/dtype、token工作量、缓存冷暖与可解释的采样模式。性能结果放在验证报告；这里的架构取舍不替代benchmark。
+
 ## 与vLLM、SGLang的框架及源码对照
 
-2026-10-25按项目范围调整：两者只作结构与代码设计参考，性能对照保留给MiniVLLM。以下是源码阅读结论，不是安装、移植、运行或速度验证；不比较代码行数，也不将同名功能视为同等覆盖。
+2026-10-25按项目范围调整：两者只作结构与代码设计参考，主要架构及性能对照对象为Nano-vLLM与MiniVLLM。以下是源码阅读结论，不是安装、移植、运行或速度验证；不比较代码行数，也不将同名功能视为同等覆盖。
 
 为避免main漂移，固定所读版本：vLLM [`5f63ea46`](https://github.com/vllm-project/vllm/commit/5f63ea461ccd567ece6f50dd3701430c0f321039)，SGLang [`773cb938`](https://github.com/sgl-project/sglang/commit/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed)。本地依据为阶段29提交`66dc76d`；后续源码变更需重新核对路径与配置分支。
 
@@ -155,4 +191,4 @@ vLLM V1把请求处理、EngineCore调度、Executor/Worker和ModelRunner分层�
 4. **按证据决定索引与异步复杂度**：Prefix扫描成为CPU热点后再选block hash或radix；CPU/GPU overlap需要in-flight批次、取消、过期结果、buffer及KV最后使用时刻的协议，不能只把`.cpu()`改成non_blocking就算完成。
 5. **继续控制范围**：保留单卡dense、Windows原生和可解释的资源所有权；多GPU、PD分离、主机层级缓存及多模态保持后置。现有continuous batching、Prefix和Graph已形成闭环，适用范围与工业框架仍有明确差异。
 
-上述顺序是基于当前代码的工程判断，尚未实现新的执行器、Radix索引或overlap scheduler。性能验收继续做项目内部消融与MiniVLLM同口径对照，不要求安装vLLM/SGLang；源码阅读也不引入Linux、WSL或Triton运行依赖。
+上述顺序是基于当前代码的工程判断，尚未实现新的执行器、Radix索引或overlap scheduler。性能验收继续做项目内部消融与Nano-vLLM、MiniVLLM同口径对照，不要求安装vLLM/SGLang；源码阅读也不引入Linux、WSL或Triton运行依赖。

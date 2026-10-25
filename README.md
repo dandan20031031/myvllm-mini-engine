@@ -307,7 +307,15 @@ median TPOT: 约 20–21 ms/token
 .\.venv\Scripts\python benchmarks\benchmark_http.py --base-url http://127.0.0.1:8000/v1 --model qwen3-0.6b --concurrency 4 --repetitions 3
 ```
 
-HTTP工具记录实际usage、TTFT、TPOT估计、P50/P95、失败和吞吐；stream chunk不当作token。`--compare LEFT_JSON RIGHT_JSON`在环境manifest、实际输出或负载条件不一致时拒绝计算速度比。项目性能对照聚焦MiniVLLM；vLLM/SGLang只比较框架结构与源码设计，见[架构报告](reports/ARCHITECTURE.md)。HTTP工具仍可连接兼容服务，不要求安装工业引擎。
+HTTP工具记录实际usage、TTFT、TPOT估计、P50/P95、失败和吞吐；stream chunk不当作token。`--compare LEFT_JSON RIGHT_JSON`在环境manifest、实际输出或负载条件不一致时拒绝计算速度比。HTTP工具用于本项目服务验收或具备同类接口的服务，Nano-vLLM/MiniVLLM的主性能对照采用待补的共同离线adapter，不把服务和离线时间混算。
+
+### 与 Nano-vLLM、MiniVLLM 对照
+
+主对照为[GeeeekExplorer/nano-vllm](https://github.com/GeeeekExplorer/nano-vllm)和[Wenyueh/MinivLLM](https://github.com/Wenyueh/MinivLLM)，两者都比较源码结构与性能；vLLM/SGLang保留为工业架构参考。
+
+- 架构：两者已有ragged prefill与抢占重算；本项目仍逐请求执行prompt chunks，但已有Windows CUDA、完整Prefix复用、可选W4A16、HTTP/SSE和显式资源关闭。具体差异与固定源码见[架构报告](reports/ARCHITECTURE.md)。
+- 性能：尚无三方同条件排名。Mini历史Graph的590.1/1304.6/1890.8 TPS是实际FP32、batch3/8/16；本项目342–358 TPS是FP16单请求；Nano官方结果来自4070 Laptop。精度、批量和计时边界不同，不能相除。
+- 复测：统一模型哈希、实际dtype、prompt token IDs、输出长度、sampling、Graph与缓存状态，再统计TTFT/TPOT、聚合TPS和显存。协议与平台限制见[性能评测报告](reports/VALIDATION_AND_BENCHMARKS.md)及[benchmark目录](benchmarks/README.md)。
 
 ### 性能分析
 
@@ -353,7 +361,7 @@ PROJECT_STATUS.md   当前项目总览、已实现能力和后续方向
 - HTTP/SSE为本地greedy接口子集；尚无多机服务、安全网关和结构化输出；
 - 投机仅greedy prompt lookup；小draft、EAGLE/MTP/DFlash、随机接受概率校正尚未实现；
 - `dandan_ops` 为可选独立算子库；默认仍使用项目 CUDA/cuBLAS backend；
-- MiniVLLM的同条件性能对照与完整量化质量集尚待完成；vLLM/SGLang仅作架构与源码对照，不承担性能跑分交付。
+- Nano-vLLM/MiniVLLM同条件性能对照与完整量化质量集尚待完成；Nano当前缺少已验证的Windows GPU运行路径，对照代码不作为引擎依赖；vLLM/SGLang只作架构参考。
 
 ## 许可证
 

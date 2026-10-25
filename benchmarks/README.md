@@ -11,9 +11,29 @@
 | `validate_system_extensions.py` | 完整模型chunk/prefix/Graph与可选真实HTTP验证，仅正确性不测速 |
 | `profile_native_batch.py` | 已预热真实runtime的PyTorch Profiler/NVTX，CPU范围、GPU kernel、Chrome trace；采集时间不是benchmark |
 
-客户端usage缺失时，不以SSE chunk数代替token数。跨引擎数据需附相同模型/精度/硬件/工作负载manifest；本仓库尚无vLLM/SGLang同条件实测结果。
+客户端usage缺失时，不以SSE chunk数代替token数。性能主对照为Nano-vLLM和MiniVLLM，vLLM/SGLang只作架构参考。本仓库尚无三个小型引擎的同条件实测排名。
 
-`mini_engine.benchmarks.runner` 提供统一计时和 JSON 输出。它不绑定某个模型后端，因此可以给 Transformers、vLLM 和 MiniQwenEngine 各写一个 adapter，再使用相同的 prompts、warmup、重复次数和输出长度。
+`mini_engine.benchmarks.runner`提供通用callable计时和JSON输出，适合固定工作量的局部实验；它不会自动校验实际生成token数或模型语义。完整跨引擎对照还需共同离线adapter，不能直接把配置中的`output_tokens`当实测输出。
+
+## Nano-vLLM / MiniVLLM 对照任务
+
+架构、采样/Graph边界与固定版本见[架构报告](../reports/ARCHITECTURE.md)，历史数据、差异和完整协议见[性能评测报告](../reports/VALIDATION_AND_BENCHMARKS.md)。本次只完成审计，尚未实现或运行共同adapter。
+
+1. 固定模型哈希与离线token IDs；统一FP16、TP1、B=1/4/8/16、prompt128/512、输出128，分别eager/Graph。
+2. Nano/Mini原版不接受greedy；共同temperature=0.6、top-k禁用/top-p=1，固定输出长度与ignore-EOS适配须披露。随机采样文本不相同不能直接判错，另做teacher-forced数值验证。
+3. 使用`load/reset/enqueue/step/close`接口，统一timer只包执行循环；逐次记录actual tokens/elapsed、每请求首token/结束时间和平均TPOT，输出聚合TPS与P50/P95。
+4. 首轮无共享前缀；冷/热Prefix、W4A16、HTTP服务各自单列，不把吞吐口径混为单请求延迟。
+5. 记录commit、dirty diff、adapter、实际参数/KV dtype、模块`__file__`、软件栈、KV预算与GPU负载；关闭资源在计时之外。
+
+平台情况：Nano当前本地GPU路径依赖NCCL/flash-attn，Windows未验证；Mini已有Windows修复，但editable安装仍指迁移前目录，须显式选定worktree。对照代码放独立环境，不引入本项目运行依赖；缺条件时结果标为未测。
+
+本项目现成命令仍可独立用于内部消融：
+
+```powershell
+. .\scripts\enter_project.ps1
+.\.venv\Scripts\python benchmarks\benchmark_native_batch.py --help
+.\.venv\Scripts\python benchmarks\benchmark_chat_graph.py --help
+```
 
 示例：
 

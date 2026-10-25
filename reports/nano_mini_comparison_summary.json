@@ -1,0 +1,189 @@
+{
+  "date": "2026-10-25",
+  "kind": "source_and_historical_performance_audit",
+  "new_gpu_benchmark_executed": false,
+  "cross_engine_speedup_allowed": false,
+  "source_versions": {
+    "myvllm": {
+      "inference_base_commit": "c9376f6b3d5a0a0a49bdfe39c935a3987cce631b"
+    },
+    "nano_vllm": {
+      "upstream_repository": "https://github.com/GeeeekExplorer/nano-vllm",
+      "upstream_snapshot": "bb823b3e06983d71485a8e1f23715ebd87d98ef8",
+      "local_head": "7074c1885c2e2e233822556cddde23044da40e82",
+      "gpu_source_windows_port": false,
+      "source_sha256": {
+        "nanovllm/engine/scheduler.py": "e7302942c967d50bb525384fa4a6e0de988d199490479d4f5965d4211bcdbd08",
+        "nanovllm/engine/model_runner.py": "2373c9daad7de3956905c9a0ec9d6b2e0a8d355a209162de8570507c5f419fd7",
+        "nanovllm/engine/block_manager.py": "d0240374f589eaa85c4c7923b8970f2635ab7bc73adc5044fa2d273955b54242",
+        "nanovllm/layers/embed_head.py": "e823fbd0a1eb9d64a90e93ade7d32f32235f0039bafc97d367d92a8ee06b3d0f",
+        "nanovllm/layers/attention.py": "00c2f52cd428bc2f82ff90ef8cbc96b0959a225daaeb035e9e0eaf63a85bfbba",
+        "nanovllm/sampling_params.py": "1e5146d1a06f5230ab049df1ea24814a1d73ba52c3ad22af04bd0f1c6293e0c0",
+        "bench.py": "42da1e51128ad0746a55be3ac3121268a343dd88d95687d9c2242e9dd3f85af6",
+        "README.md": "b6c5181482d451580c71688f5d8b48a50c05341d81695ed8a01962abd09ba486"
+      }
+    },
+    "mini_vllm": {
+      "upstream_repository": "https://github.com/Wenyueh/MinivLLM",
+      "upstream_snapshot": "00db3b477f33be1de91400483ae7d210c4d61868",
+      "windows_fork_repository": "https://github.com/dandan20031031/MinivLLM",
+      "windows_revision": "59466f60ac82d388b2cfd8d9805a2090c33fd7a1",
+      "upstream_checkout_has_uncommitted_runtime_patches": true,
+      "source_sha256": {
+        "src/myvllm/engine/scheduler.py": "9a1b3298d4493c52dec6bd344e14858b5da79178146b889597f9c3a029e0a633",
+        "src/myvllm/engine/model_runner.py": "e3ad76844ce44749ffdcda72c8bcb135c85dfd609a8be3afd454538607fd9650",
+        "src/myvllm/engine/block_manager.py": "44fcff90bf6a33f2bd0c0e8e3e620b1d03ccfcd65b4a35553acaa4f909822f7f",
+        "src/myvllm/layers/embedding_head.py": "28f771a7d7442b4179e4794e8cf029091d9a846f22650aeb159faaf35d95d421",
+        "src/myvllm/layers/attention.py": "e0cfbe1d8de3f368e668997068287c6b0f99c66e9ebd6da324ea281b26a4373e",
+        "src/myvllm/sampling_parameters.py": "696da171eebe5251227cd7faf8da84ca0f3b7c9e6c8de229f2cdf7dc11da42ad"
+      },
+      "windows_runner_sha256": {
+        "src/myvllm/engine/model_runner.py": "ca9760ea71934315847fd10cdb3aed90e6eb5076e9c161de439b85647d8771e2"
+      }
+    }
+  },
+  "historical_observations": {
+    "myvllm": {
+      "source": "reports/stage29_chat_graph_summary.json",
+      "source_sha256": "c88cf03eb5cde72f2096c5d2f5443334a44506e64726b20516404c78a2682da8",
+      "gpu": "RTX 5080",
+      "dtype": "fp16",
+      "batch_size": 1,
+      "sampling": "greedy",
+      "mode": "cuda_graph",
+      "cases": [
+        {
+          "prompt": "Explain KV Cache in one paragraph.",
+          "max_new_tokens": 64,
+          "ttft_p50_ms": 20.44000000023516,
+          "tpot_p50_ms": 2.529526190488786,
+          "output_tokens_per_second": 357.51177391529393
+        },
+        {
+          "prompt": "Explain KV Cache in one paragraph.",
+          "max_new_tokens": 128,
+          "ttft_p50_ms": 19.752650001464644,
+          "tpot_p50_ms": 2.6571842519742646,
+          "output_tokens_per_second": 355.03967961425985
+        },
+        {
+          "prompt": "用一小段话解释 continuous batching。",
+          "max_new_tokens": 64,
+          "ttft_p50_ms": 23.49320000030275,
+          "tpot_p50_ms": 2.586696031733207,
+          "output_tokens_per_second": 342.11182780396103
+        },
+        {
+          "prompt": "用一小段话解释 continuous batching。",
+          "max_new_tokens": 128,
+          "ttft_p50_ms": 24.39589999994496,
+          "tpot_p50_ms": 2.648231496074348,
+          "output_tokens_per_second": 355.10967918563443
+        }
+      ],
+      "scope": "Same loaded runner and weights; generate_incremental(use_cuda_graph=False/True) changes only the per-call decode path. Runner latency spans prefill through last emitted token, excluding tokenization/text decode; outer call wall time includes those. First calls, warmup, nvidia-smi, file hashes and git queries are excluded from warmed summaries. No profiler or model hooks are active."
+    },
+    "mini_vllm": {
+      "reports": [
+        {
+          "name": "MinivLLM-Benchmark-报告.md",
+          "archive_relative_to_workspace": "pagedattn-bench-report/MinivLLM-Benchmark-报告.md",
+          "archive_sha256": "40725f266a8a9998c7760ef7a92fd28c8149a3c2ff37113719370ac64e1fae14",
+          "report_commit": "0ded3fd263024dfc6fa13407fb8ef4cf1da6d835",
+          "committed_report_sha256": "40725f266a8a9998c7760ef7a92fd28c8149a3c2ff37113719370ac64e1fae14",
+          "archive_matches_committed_after_lf_normalization": true
+        },
+        {
+          "name": "MinivLLM-优化实验报告.md",
+          "archive_relative_to_workspace": "pagedattn-bench-report/MinivLLM-优化实验报告.md",
+          "archive_sha256": "470416908d7e748f6dc3959ce5c44964280a4affe1f9f6008be83adc9f116b17",
+          "report_commit": "0ded3fd263024dfc6fa13407fb8ef4cf1da6d835",
+          "committed_report_sha256": "470416908d7e748f6dc3959ce5c44964280a4affe1f9f6008be83adc9f116b17",
+          "archive_matches_committed_after_lf_normalization": true
+        }
+      ],
+      "reported_date": "2026-10-22",
+      "gpu": "RTX 5080",
+      "actual_compute_dtype": "fp32",
+      "checkpoint_load_dtype_does_not_define_parameter_dtype": true,
+      "sampling_temperature": 0.6,
+      "mode": "cuda_graph",
+      "max_model_length": 128,
+      "requested_max_output_tokens": 256,
+      "runtime_commit_recorded": false,
+      "raw_repetition_samples_available": false,
+      "reported_rows": [
+        {
+          "batch_size": 3,
+          "output_tokens": 336,
+          "latency_seconds_rounded": 0.569,
+          "reported_tps": 590.1
+        },
+        {
+          "batch_size": 8,
+          "output_tokens": 875,
+          "latency_seconds_rounded": 0.671,
+          "reported_tps": 1304.6
+        },
+        {
+          "batch_size": 16,
+          "output_tokens": 1732,
+          "latency_seconds_rounded": 0.916,
+          "reported_tps": 1890.8
+        }
+      ],
+      "measurement_caveat": "Median of three latencies combined with last run's token count; per-run samples unavailable; generate includes input/output processing."
+    },
+    "nano_vllm": {
+      "source": "upstream pinned README.md and bench.py",
+      "local_measurement": false,
+      "gpu": "RTX 4070 Laptop 8GB",
+      "actual_dtype_confirmed": false,
+      "requests": 256,
+      "input_length_range": [
+        100,
+        1024
+      ],
+      "output_length_range": [
+        100,
+        1024
+      ],
+      "reported_output_tokens": 133966,
+      "reported_seconds": 93.41,
+      "reported_tps": 1434.13
+    }
+  },
+  "comparison_blockers": [
+    "No common workload, timing boundary, actual precision, batch or software stack in existing records.",
+    "Nano TP1 still initializes NCCL and directly imports flash-attn; no verified Windows GPU execution path.",
+    "Mini installed editable path points to its pre-migration directory; source import must be selected explicitly.",
+    "Nano and Mini original SamplingParams reject greedy; common sampling or a disclosed adapter is required.",
+    "A shared offline benchmark adapter remains unimplemented; HTTP and generic callable timers do not provide it."
+  ],
+  "next_measurement_matrix": {
+    "model": "Qwen3-0.6B",
+    "dtype": "fp16",
+    "tensor_parallel_size": 1,
+    "batch_sizes": [
+      1,
+      4,
+      8,
+      16
+    ],
+    "prompt_lengths": [
+      128,
+      512
+    ],
+    "fixed_output_tokens": 128,
+    "temperature": 0.6,
+    "top_k": 0,
+    "top_p": 1.0,
+    "modes": [
+      "eager",
+      "cuda_graph"
+    ],
+    "shared_prefix_baseline": false,
+    "warmup": 2,
+    "repetitions": 6
+  }
+}

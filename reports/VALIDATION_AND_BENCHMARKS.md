@@ -45,6 +45,53 @@ $env:MINI_ENGINE_TEST_CUDA = "1"
 
 回归覆盖页边界/尾组、非法metadata、非默认stream、FP16/BF16、Graph replay、prefix边界logits、LRU/live引用、有限KV容量、投机拒绝回退/EOS、服务取消/慢消费者/异常释放。新的D128 kernel尚未完成compute-sanitizer memcheck/racecheck，数值与Graph对拍不能代替它们。
 
+## Nano-vLLM、MiniVLLM性能对照：现有证据与复测协议
+
+2026-10-25将两个小型引擎同时设为架构与性能主对照；vLLM/SGLang仅作工业源码参考。架构已按固定源码核对，见[主要对照](ARCHITECTURE.md)。**本次审计未运行新的三方GPU benchmark，当前没有同条件速度排名。**
+
+### 已有数值能说明什么
+
+| 证据 | 实际条件与计时范围 | 历史观察 |
+|---|---|---|
+| 本项目阶段29 | RTX5080，FP16，B1，greedy，Graph，64/128输出；runner从prefill到末token，排除分词/文本decode；两prompt、每组6次 | TTFT P50约19.75–24.40ms，TPOT P50约2.53–2.66ms，总输出342.11–357.51 TPS |
+| MiniVLLM本地修复版本 | RTX5080，**实际FP32**，temperature=0.6，Graph，B3/8/16；总长上限128，实际输出336/875/1732；generate墙钟包含输入/输出处理 | 延迟中位数0.569/0.671/0.916s，报告TPS为590.1/1304.6/1890.8 |
+| Nano-vLLM官方README | RTX4070 Laptop 8GB，Qwen3-0.6B，256请求，输入/输出随机100–1024；所附bench采用temperature=0.6、ignore EOS，generate总体时间 | 官方记录133966输出token、93.41s、1434.13 TPS；不是本机实测，未确认该表实际dtype |
+
+本项目数据来自[阶段29摘要](stage29_chat_graph_summary.json)。Mini来源为2026-10-22《MinivLLM Decode 优化实验报告：批规模扩展与 CUDA Graph 边界》；本地归档已迁至`MinivLLM-workspace/pagedattn-bench-report/`，同名报告也在本地benchmark提交`0ded3fd263024dfc6fa13407fb8ef4cf1da6d835`的`docs/`内。Nano来源为[固定版本README](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/README.md#benchmark)及其[bench.py](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/bench.py)。
+
+这些数值不能相除：硬件、实际精度、batch、采样、停止长度、缓存和计时范围不同。Mini历史只留下MD/HTML汇总，没有逐次JSON或精确运行源码指纹，因此不能把590.1 TPS直接归因于当前某个checkout，也不能视为统计可靠的最终基线。来源文件哈希、条件与差异见[对照审计摘要](nano_mini_comparison_summary.json)。
+
+Mini报告还需保留以下修正：
+
+- FP16 checkpoint通过`copy_`进入默认FP32参数，不能以权重文件dtype代表计算dtype；复测必须从实际参数、激活和KV取值。
+- 原Graph 420 TPS是padding/bucket修复之前的观察；后续590.1 TPS属于另一状态，不能混称同一最终版本。
+- 历史脚本使用三次latency中位数，却取最后一轮token数计算TPS；随机停止长度变化时分子与分母不对应。新脚本逐次保存实际token和latency，并报告`sum(tokens)/sum(seconds)`。
+- 原Transformers对照混入prompt token、不同停止条件与同步边界；不复用13x/49x结论。Profiler中kernel累计时间与wall的差额，也不能全部归因为CPU launch。
+
+### 共同benchmark应如何执行
+
+首轮只比较Qwen3-0.6B浮点路径；W4A16是本项目独立消融，不与另一引擎FP16混算优化倍率。
+
+| 项目 | 共同约定 |
+|---|---|
+| 模型与输入 | 同一checkpoint和tokenizer文件SHA256；提前生成同一批token IDs，记录完整workload/hash；不把三个不同chat template当同一输入 |
+| 精度与软件 | 基线FP16，记录所有参数dtype分布、激活与KV dtype；优先相同Python/PyTorch/CUDA/驱动，无法统一时标为软件栈对照，不能把差异全归因于引擎 |
+| 工作量 | B=1/4/8/16，prompt=128/512，output=128；输出长度固定，使用实际token计数；明确TP1、最大活跃数、block size和KV字节预算 |
+| 采样 | 原版Nano/Mini拒绝temperature=0；共同基线temperature=0.6，top-k禁用、top-p=1。统一ignore EOS/总长预算，所需adapter及补丁明确记录；greedy另设有标识的adapter组 |
+| Eager/Graph | 分别测；warmup与capture排除，记录首次启动成本与实际图内范围，不把hidden-only Graph当完整logits/采样Graph |
+| 缓存 | 主基线无共享前缀；每轮明确清空状态或使用不共享完整block的新输入。Prefix冷/热命中另开组，不能让预热prompt改变基线工作量 |
+| 计时 | offline：模型/分词/入队准备完成且GPU同步后，从执行循环前到末token完成，最终同步；排除print、tqdm、文本decode、指纹查询、关闭和性能插桩 |
+| 指标 | 每请求TTFT、平均TPOT、latency P50/P95，逐次actual tokens/elapsed，聚合输出TPS、显存allocated/reserved、KV容量与命中token；不同随机采样实现不强制文本digest一致，另做固定token的数值/质量验证 |
+| 复现信息 | engine commit、dirty diff和源码哈希，adapter版本、模块实际导入路径、模型哈希、参数、GPU快照；独立进程顺序运行，不并发争抢同一GPU |
+
+统一离线adapter尚未实现；现有`benchmark_native_batch.py`只覆盖本项目，`benchmark_http.py`覆盖HTTP服务，两者都不能直接宣布完成三方对照。目标接口为`load/reset/enqueue/step/close`：`step`返回每请求token进度以记录TTFT/TPOT，结果保持原始逐次样本。
+
+### 本机可行性与当前阻碍
+
+Nano本地只有CPU测试提交，GPU runner在TP1仍无条件NCCL，并强制Triton/flash-attn；现有`.venv`缺少GPU运行依赖，不能在Windows直接运行。不会为跑分给引擎引入Linux/WSL依赖，也不悄悄将其attention换成我们的实现。如果后续有兼容Windows的原版后端或单独适配版本，需记录差异后补测；当前填“未测”。
+
+Mini可使用固定Windows分支`59466f60`；主checkout的Windows/Graph改动未提交，不能只记录其HEAD=00db3b47。现有解释器为Python3.11/Torch2.11，且editable安装仍指向迁移前目录；需用显式源码路径核验`myvllm.__file__`与源码哈希。我们的正式环境为Python3.13/Torch2.9；未统一软件栈前，不能发布严格归因的倍率。
+
 ## 保留的性能结果
 
 ### D128 PagedAttention配对实验
@@ -109,7 +156,7 @@ HTTP指标保留以下定义：
 
 `--backend-manifest` 的comparison至少包含checkpoint/tokenizer固定revision或hash、chat_template_sha256、dtype/quantization、kv_cache_dtype、max_model_len、kv_cache_bytes和prefix_cache_policy；驱动/CUDA等影响条件也应补入。`implementation`记录具体引擎、启动参数及构建指纹。
 
-`--compare`检查model、负载hash、sampling、OS/GPU声明、comparison manifest、逐请求实际token数及输出文本hash；有失败、缺usage/原始记录或条件不一致即拒绝倍率。通过检查仅说明声明相符，`remote_conditions_independently_verified=false`仍保留。2026-10-25起性能交付对象收敛为MiniVLLM和项目内部消融；vLLM/SGLang改为架构与源码对照，不再要求采集它们的性能结果。完整任务质量集与长期服务压测仍待完成。
+`--compare`检查model、负载hash、sampling、OS/GPU声明、comparison manifest、逐请求实际token数及输出文本hash；有失败、缺usage/原始记录或条件不一致即拒绝倍率。通过检查仅说明声明相符，`remote_conditions_independently_verified=false`仍保留。该工具用于同类HTTP服务；Nano-vLLM/MiniVLLM的主对照应使用共同离线adapter。两者均纳入架构与性能，vLLM/SGLang保留源码参考；完整任务质量集与长期服务压测仍待完成。
 
 ## Chat完整decode Graph与单请求配对测量（2026-10-24）
 
