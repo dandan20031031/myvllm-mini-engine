@@ -4,36 +4,16 @@ import argparse
 import json
 from dataclasses import asdict
 
-import torch
-
+from .cli import add_runner_arguments, runner_config_from_args
 from .model import NativeQwen3Runner
-from .config import QuantConfig
 
 
 def main():
     parser = argparse.ArgumentParser(description="Single-request native Qwen3 inference")
-    parser.add_argument("--model", default="Qwen/Qwen3-0.6B")
+    add_runner_arguments(parser)
     parser.add_argument("--prompt")
     parser.add_argument("--chat", action="store_true", help="start an interactive multi-turn chat")
-    parser.add_argument("--cuda-graph", action="store_true", help="capture decode and greedy sampling; requires CUDA decode/data backends")
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--dtype", choices=["bf16", "fp16", "fp32"], default="bf16")
     parser.add_argument("--max-new-tokens", type=int, default=128)
-    parser.add_argument("--num-blocks", type=int, default=256)
-    parser.add_argument("--block-size", type=int, default=16)
-    parser.add_argument("--prefill-backend", choices=["auto", "flash", "math", "cuda", "dandan"], default="auto")
-    parser.add_argument("--decode-backend", choices=["torch", "cuda"], default="torch")
-    parser.add_argument("--elementwise-backend", choices=["torch", "cuda"], default="torch")
-    parser.add_argument("--data-backend", choices=["torch", "cuda"], default="torch")
-    parser.add_argument("--linear-backend", choices=["torch", "cuda", "dandan", "dandan_cuda"], default="torch")
-    parser.add_argument("--fuse-projections", action="store_true",
-                        help="fuse QKV and Gate/Up projections into concatenated matmuls")
-    parser.add_argument("--local-files-only", action="store_true")
-    parser.add_argument("--thinking", action="store_true")
-    parser.add_argument("--quantization", choices=["none", "int8", "int4", "fp8", "fp8_e4m3", "fp8_e5m2", "mxfp8", "nvfp4"], default="none")
-    parser.add_argument("--quant-group-size", type=int, default=128)
-    parser.add_argument("--quant-backend", choices=["reference", "dandan"], default="reference")
-    parser.add_argument("--sampling-backend", choices=["torch", "cuda"], default="torch")
     parser.add_argument("--speculative", choices=["none", "prompt_lookup"], default="none")
     parser.add_argument("--max-draft-tokens", type=int, default=4)
     parser.add_argument("--adaptive-draft", action="store_true")
@@ -42,20 +22,13 @@ def main():
         parser.error("--cuda-graph and --speculative cannot be combined yet")
     if not args.chat and args.prompt is None:
         parser.error("--prompt is required unless --chat is used")
-    dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[args.dtype]
-    runner = NativeQwen3Runner.from_pretrained(
-        args.model, device=args.device, dtype=dtype, prefill_backend=args.prefill_backend, decode_backend=args.decode_backend,
-        elementwise_backend=args.elementwise_backend,
-        data_backend=args.data_backend,
-        linear_backend=args.linear_backend,
-        num_blocks=args.num_blocks, block_size=args.block_size,
-        enable_thinking=args.thinking, local_files_only=args.local_files_only,
-        fuse_projections=args.fuse_projections,
-        quant_backend=args.quant_backend,
-        sampling_backend=args.sampling_backend,
-        quantization=None if args.quantization == "none" else QuantConfig(
-            args.quantization, activation_dtype=args.dtype, group_size=args.quant_group_size),
-    )
+    if args.max_new_tokens <= 0 or args.max_draft_tokens <= 0:
+        parser.error("token limits must be positive")
+    try:
+        config = runner_config_from_args(args)
+    except ValueError as error:
+        parser.error(str(error))
+    runner = NativeQwen3Runner.from_pretrained(config.model_name_or_path, **config.runner_kwargs())
     try:
         if args.chat:
             messages = []

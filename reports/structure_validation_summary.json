@@ -1,0 +1,77 @@
+{
+  "date": "2026-10-25",
+  "kind": "structure_and_resource_lifecycle_validation",
+  "base_commit": "2706784",
+  "performance_measurement": false,
+  "environment": {
+    "os": "Windows 11",
+    "gpu": "NVIDIA GeForce RTX 5080",
+    "torch": "2.9.1+cu128",
+    "torch_cuda": "12.8"
+  },
+  "regression": {
+    "passed": 403,
+    "failed": 0,
+    "skipped": 0,
+    "warnings": 2,
+    "cuda_tests_enabled": true,
+    "junit": "build/validation/structure_pytest.xml",
+    "command": "python -m pytest -q -o cache_dir=build/pytest_cache --junitxml=build/validation/structure_pytest.xml",
+    "warning_notes": [
+      "CUDA Toolkit 13.3 differs from PyTorch CUDA 12.8",
+      "setuptools private MSVC environment interface"
+    ]
+  },
+  "native_cli_smoke": {
+    "passed": true,
+    "model": "Qwen3-0.6B",
+    "dtype": "bf16",
+    "cuda_graph": true,
+    "finish_reason": "stop"
+  },
+  "full_model_validation": {
+    "model": "Qwen3-0.6B",
+    "dtype": "bf16",
+    "prompt_tokens": 64,
+    "output_tokens_per_request": 8,
+    "raw_result": "build/validation/structure_system_validation.json",
+    "command": "python benchmarks/validate_system_extensions.py --model models/Qwen3-0.6B --dtype bf16 --http-smoke --output build/validation/structure_system_validation.json",
+    "chunked_prefill_output_match": true,
+    "prefix_cache": {
+      "passed": true,
+      "cold_computed_prompt_tokens": 64,
+      "warm_computed_prompt_tokens": 0,
+      "partial_computed_prompt_tokens": 5,
+      "shared_kv_unchanged": true
+    },
+    "batch_graph": [
+      {
+        "batch_size": 2,
+        "output_match": true,
+        "graph_captured": true,
+        "all_page_refcounts_zero": true
+      },
+      {
+        "batch_size": 4,
+        "output_match": true,
+        "graph_captured": true,
+        "all_page_refcounts_zero": true
+      }
+    ],
+    "http_sse": {
+      "passed": true,
+      "concurrent_requests": 2,
+      "usage_completion_tokens": [
+        8,
+        8
+      ],
+      "used_blocks_after_service_close": 0
+    }
+  },
+  "packaging": {
+    "wheel_built": true,
+    "new_modules_and_cuda_sources_present": true,
+    "wheel": "build/wheels/miniqwen_engine-0.1.0-py3-none-any.whl"
+  },
+  "scope": "Correctness and cleanup only; no throughput or latency improvement claimed. Full-model checks cover BF16; optional FP16/W4A16 paths are included in the unit regression, not newly repeated full-model quality validation."
+}

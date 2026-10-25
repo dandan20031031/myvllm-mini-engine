@@ -15,41 +15,56 @@
 | 精度 | FP32/FP16/BF16；INT8/INT4/FP8 weight-only reference；可选dandan FP16 GEMM/Flash和W4A16 CUDA计算 |
 | 投机 | 无额外模型的greedy prompt lookup、并行验证、接受/拒绝、KV回退、接受率自适应draft预算 |
 | 接口 | CLI、多轮Chat、Windows HTTP chat completions子集/SSE；单GPU worker调度，有界输入/输出队列和断线取消 |
+| 模块边界 | CLI/HTTP共享RunnerConfig与启动参数；服务协议、worker、HTTP传输分层；native/reference共享生成结果类型 |
 | 实验 | kernel配对sweep、真实batch eager/Graph、投机对拍、完整模型系统验收、兼容服务HTTP负载与比较条件检查 |
 | Profiling | PyTorch CPU/CUDA trace、NVTX阶段范围、eager/Graph对照；Nsight命令与当前采集限制见阶段28报告 |
 
 ## 代码调用链
 
 ```text
-CLI / HTTP线程 / benchmark
-        |
-NativeQwen3Runner / 服务单GPU worker
-        |
-NativeBatchRuntime -> Scheduler -> GenerationRequest
-        |                  |
-  PrefixCache          BlockManager
-        |                  |
-NativeQwen3 ---------- KVCachePool
-        |
-CUDA kernels / cuBLAS / optional dandan_ops
+CLI/Chat: __main__ -> cli/RunnerConfig -> NativeQwen3Runner
+                                             |
+                            generate_incremental -> NativeQwen3 / Chat Graph
+
+HTTP: server -> cli/RunnerConfig -> serving.http -> InferenceService worker
+                                                        |
+                                   NativeBatchRuntime -> Scheduler / Request
+                                            |                  |
+                                       NativeQwen3       BlockManager / PrefixCache
+
+共享执行基础: NativeQwen3 -> KVCachePool + CUDA / cuBLAS / optional dandan_ops
 ```
 
+- `mini_engine/config.py`、`cli.py`：统一启动参数与静态组合校验；模型/硬件能力仍由runner检查，请求和服务限额留在各入口。
+- `mini_engine/model/native_runner.py`：加载权重、单请求生成、Chat Graph、创建batch会话；CLI直接走该生成循环，不经过batch scheduler。
+- `mini_engine/model/outputs.py`：native与Transformers reference共享`IncrementalGenerationResult`，结果字段不再依赖reference runner定义。
 - `mini_engine/engine/runtime.py`：decode优先，再执行未缓存prompt块；模型结果交给请求采样与状态更新。
 - `mini_engine/cache/`：block的物理所有权、完整prefix边界与KV tensor存储分离。
 - `mini_engine/model/native_qwen3.py`：单token直接paged decode；多token suffix按绝对位置causal验证。
 - `mini_engine/speculative.py`：将pending token与草稿一次送入目标，提交连续接受前缀，拒绝部分截断KV逻辑长度并归还尾页。
-- `mini_engine/server.py`：HTTP线程仅验证/收发；tokenizer、runtime、KV变更全部由单worker处理。
+- `mini_engine/serving/protocol.py`、`service.py`、`http.py`：分别负责请求协议/错误、单GPU worker/队列生命周期、HTTP连接/JSON/SSE；tokenizer、runtime、KV变更由worker处理。`mini_engine/server.py`保留启动入口和兼容导出。
 - `mini_engine/kernels/cuda_extension.py`：内容hash隔离Windows DLL构建；旧会话可继续加载旧DLL，新版本编译到不同路径。launch错误检查已恢复，Graph中只跳过会同步到CPU的tensor metadata检查。
 
 技术报告按主题整理，入口见 [技术报告目录](reports/README.md)：[推理引擎架构与实现](reports/ARCHITECTURE.md)、[系统验证与性能评测](reports/VALIDATION_AND_BENCHMARKS.md)、[算子后端性能复核](reports/BACKEND_PERFORMANCE_RECHECK.md)和[推理引擎性能分析指南](reports/PROFILING.md)；原始JSON实验摘要保留。
 
 2026-10-25已补vLLM/SGLang固定commit的架构与源码对照：请求执行、调度进度、执行批次、KV/Prefix、Graph和后端契约，结论并入架构报告。性能对照收敛为MiniVLLM；下一步重点是共享执行接口、真正ragged prefill与后端能力边界，尚未因此实现新的异步/多进程执行器。
 
+## 2026-10-25：结构维护与资源所有权
+
+本轮已整理现有Qwen3路径：共享启动配置、拆分服务职责、提取公共输出类型，并集中batch会话的清理。CLI和HTTP两套生成循环继续保留；全量403项回归与真实BF16模型系统验收通过，本轮没有新增性能结果。
+
+`NativeBatchRuntime.close()`在所属worker停止执行后同步CUDA，取消waiting/running请求、清除Prefix引用，释放本会话创建的Graph和scratch，并恢复scheduler回调。借用的Graph manager只移除绑定本会话scratch的bucket；外部提供的padding页不由runtime释放。runner继续持有模型权重与KV tensor，关闭runtime后才可复用其allocator。共享manager/allocator不支持两个runtime并发使用。
+
+HTTP worker的`finally`调用runtime.close；服务入口先关闭HTTP连接、等待worker结束，再调用runner.close。CLI在`finally`关闭Chat Graph与scratch。worker未退出时，service.close会报错，避免提前释放仍被GPU使用的资源。Qwen3.5、混合注意力/多模态适配与独立权重加载器暂缓，继续保留Transformers加载和正确性参考。
+
+batch benchmark、profiling和系统验证同样通过`finally`/执行会话调用`runtime.close()`；关闭不进入性能计时，profiling先恢复临时插桩再释放资源。wheel构建及新模块/CUDA源码打包检查通过。证据见[结构维护验收摘要](reports/structure_validation_summary.json)。
+
 ## 验证与性能证据
 
 设备：RTX5080 SM120，PyTorch2.9.1+cu128。项目CUDA使用Toolkit13.3；独立算子库此前用12.8构建。两者均须通过目标机回归，不能因为版本提示而忽略运行测试。
 
-- 最新全量356 passed、2 warnings；CUDA/Graph/HTTP测试实际执行，新增Chat跨页/多轮、异常回收、batch缩容与计量检查。
+- 最新全量403 passed、2 warnings；CUDA/Graph/HTTP实际执行，覆盖启动配置、兼容导入、创建失败回滚、关闭幂等、借用资源保护、Graph退休后页重用与插桩恢复。JUnit保存在`build/validation/structure_pytest.xml`。
+- 本轮重新通过完整Qwen3-0.6B BF16分块/Prefix、batch2/4 eager/Graph与并发HTTP/SSE验收；所有会话关闭后页引用归零。原始记录为`build/validation/structure_system_validation.json`，不作为性能测量。
 - 完整Qwen3 BF16：64-token冷/热prefix的计算64→0，5-token后缀仅算5；共享页保持不变，完整/分块输出一致。
 - batch2/4 eager/Graph输出一致，capture真实执行；真实并发HTTP/SSE正常返回usage/DONE，关闭后KV引用全部为0。
 - FP16 dandan GEMM/Flash与W4A16也通过完整模型chunk/prefix/Graph验收；这比较相同精度的执行路径，不代表INT4与BF16质量相同。
@@ -63,6 +78,8 @@ CUDA kernels / cuBLAS / optional dandan_ops
 2026-10-24新增性能复核发现同一cuBLAS基线首末轮404→725 TPS，尚不足以给出dandan FP16端到端加速比。W4A16本轮Graph分配显存峰值1054.64MiB，对应FP16为1614.39MiB；具体条件和输出差异见[算子后端性能复核](reports/BACKEND_PERFORMANCE_RECHECK.md)。真实FP16 eager/Graph CPU+CUDA trace已采集，另有2项profiling恢复/异常测试通过，见[推理引擎性能分析指南](reports/PROFILING.md)。
 
 ## 仍需完成
+
+结构维护回归已完成；接下来优先补执行批次接口与同条件MiniVLLM对照，再按实际瓶颈选择下面的一条功能路线深化。
 
 1. **真正ragged batched prefill、直接paged多query验证**：当前chunk仍逐请求执行，suffix需要gather KV。
 2. **FP8/INT8 KV与FP8 GEMM**：定义scale、直接分页读取和模型误差；已有W4A16不能代表这些格式完成。

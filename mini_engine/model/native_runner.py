@@ -7,7 +7,7 @@ import torch
 from ..cache import BlockManager
 from ..sampling import sample_next_token
 from .native_qwen3 import NativeQwen3
-from .qwen3 import IncrementalGenerationResult
+from .outputs import IncrementalGenerationResult
 
 
 class NativeQwen3Runner:
@@ -259,7 +259,11 @@ class NativeQwen3Runner:
                              use_cuda_graph=False, graph_batch_sizes=(1, 2, 4, 8),
                              graph_block_buckets=(16, 32, 64), prefill_chunk_size=None,
                              max_num_batched_tokens=4096, enable_prefix_cache=True):
-        """Create the scheduler-driven runtime over this runner's model/cache."""
+        """Create a closeable batch session over this runner's model/cache.
+
+        Call ``runtime.close()`` before reusing the runner's KV allocator.
+        Explicitly supplied graph managers and padding pages are borrowed.
+        """
         from ..cache import PrefixCache
         from ..engine import NativeBatchRuntime
         from ..engine.scheduler import Scheduler
@@ -267,7 +271,9 @@ class NativeQwen3Runner:
         scheduler = Scheduler(self.block_manager, max_num_batched_tokens=max_num_batched_tokens,
                               prefill_chunk_size=prefill_chunk_size)
         prefix = PrefixCache(self.block_manager, max_entries=max_prefix_entries)
-        if use_cuda_graph and graph_manager is None:
+        owns_graph_manager = use_cuda_graph and graph_manager is None
+        graph_padding_owner = None
+        if owns_graph_manager:
             from ..engine import DecodeGraphManager
             graph_manager = DecodeGraphManager(
                 self.model, self.cache,
@@ -275,20 +281,31 @@ class NativeQwen3Runner:
                 block_buckets=graph_block_buckets,
                 capture_sampling=True, sampling_backend=self.sampling_backend,
             )
-        if graph_manager is not None and graph_padding_block_ids is None:
-            if graph_padding_blocks <= 0:
-                graph_padding_blocks = max(getattr(graph_manager, "batch_sizes", graph_manager.block_buckets))
-            graph_padding_block_ids = self.block_manager.allocate(
-                # BlockManager.allocate receives a token count, while the
-                # graph manager expresses scratch capacity in physical pages.
-                "__graph_padding__", graph_padding_blocks * self.block_manager.block_size
+        try:
+            if graph_manager is not None and graph_padding_block_ids is None:
+                if graph_padding_blocks <= 0:
+                    graph_padding_blocks = max(getattr(graph_manager, "batch_sizes", graph_manager.block_buckets))
+                padding_owner = f"__graph_padding__:{id(scheduler)}"
+                graph_padding_block_ids = self.block_manager.allocate(
+                    # BlockManager.allocate receives tokens; graph scratch
+                    # capacity is expressed in physical pages.
+                    padding_owner, graph_padding_blocks * self.block_manager.block_size
+                )
+                graph_padding_owner = padding_owner
+            runtime = NativeBatchRuntime(
+                self.model, scheduler, self.cache,
+                prefix_cache=prefix, eos_token_ids=self.eos_token_ids,
+                graph_manager=graph_manager,
+                prefill_chunk_size=prefill_chunk_size, enable_prefix_cache=enable_prefix_cache,
+                sampling_backend=self.sampling_backend, owns_graph_manager=owns_graph_manager,
+                graph_padding_owner=graph_padding_owner,
             )
-        runtime = NativeBatchRuntime(
-            self.model, scheduler, self.cache,
-            prefix_cache=prefix, eos_token_ids=self.eos_token_ids,
-            graph_manager=graph_manager,
-            prefill_chunk_size=prefill_chunk_size, enable_prefix_cache=enable_prefix_cache,
-            sampling_backend=self.sampling_backend,
-        )
-        runtime.graph_padding_block_ids = graph_padding_block_ids
-        return runtime
+            runtime.graph_padding_block_ids = graph_padding_block_ids
+            return runtime
+        except BaseException:
+            prefix.clear()
+            if owns_graph_manager:
+                graph_manager.buckets.clear()
+            if graph_padding_owner is not None:
+                self.block_manager.release(graph_padding_owner)
+            raise

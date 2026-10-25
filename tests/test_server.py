@@ -61,6 +61,16 @@ class FakeRuntime:
         self.scheduler = FakeScheduler(runner)
         self.prefix_cache = SimpleNamespace(clear=runner.record)
         self.enable_prefix_cache = True
+        self.closed = False
+
+    def close(self):
+        if self.closed:
+            return
+        self.runner.record()
+        for request in list(self.scheduler.waiting) + list(self.scheduler.running.values()):
+            self.scheduler.abort(request.request_id)
+        self.prefix_cache.clear()
+        self.closed = True
 
     def step(self):
         self.runner.record()
@@ -281,6 +291,37 @@ def test_shutdown_cancels_requests_and_releases_kv():
             service.close()
             assert pending.result()[0] == 503
         assert runner.runtime.scheduler.block_manager.used_blocks == 0
+        assert runner.runtime.closed
+        assert len(runner.thread_ids) == 1
+        assert not service.healthy
+
+
+def test_serving_public_exports_keep_server_compatibility():
+    from mini_engine.serving import APIError as ServingAPIError
+    from mini_engine.serving import ChatHTTPServer as ServingHTTPServer
+    from mini_engine.serving import InferenceService as ServingService
+    from mini_engine.serving.protocol import validate_chat_request
+
+    assert (APIError, ChatHTTPServer, InferenceService) == (
+        ServingAPIError, ServingHTTPServer, ServingService)
+    messages, tokens, stream, usage = validate_chat_request(
+        payload(), model_name="tiny", max_new_tokens=512)
+    assert messages == payload()["messages"]
+    assert (tokens, stream, usage) == (3, False, False)
+
+
+def test_shutdown_still_releases_waiters_if_runtime_cleanup_fails(monkeypatch):
+    def fail_close(runtime):
+        raise RuntimeError("injected runtime cleanup failure")
+
+    monkeypatch.setattr(FakeRuntime, "close", fail_close)
+    runner = FakeRunner(step_delay=0.02)
+    with running_server(runner) as (server, service, _):
+        with ThreadPoolExecutor(max_workers=1) as clients:
+            pending = clients.submit(request, server, payload(max_tokens=128))
+            assert runner.step_started.wait(2)
+            service.close()
+            assert pending.result()[0] == 503
         assert not service.healthy
 
 

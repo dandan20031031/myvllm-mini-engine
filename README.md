@@ -1,6 +1,6 @@
 # MiniQwenEngine
 
-MiniQwenEngine 是一个面向 Qwen3-0.6B 的 Windows 11 单 GPU 推理引擎，使用 PyTorch 加载模型，并通过项目自有 CUDA 扩展实现 Paged KV Cache、PagedAttention、数据移动和 elementwise 算子。
+MiniQwenEngine 是一个面向 Qwen3-0.6B 的 Windows 11 单 GPU 推理引擎，使用 Transformers 加载权重和 tokenizer，并通过项目自有 CUDA 扩展实现 Paged KV Cache、PagedAttention、数据移动和 elementwise 算子。
 
 当前实现和后续方向见 [PROJECT_STATUS.md](PROJECT_STATUS.md)，架构与实验依据见 [技术报告目录](reports/README.md)。项目仍处于研究和性能优化阶段，单算子 benchmark 不等同于 vLLM 的端到端性能结论。
 
@@ -174,7 +174,7 @@ Invoke-RestMethod http://127.0.0.1:8000/v1/chat/completions -Method Post -Conten
 CPU/reference 回归：
 
 ```powershell
-.\.venv\Scripts\python -m pytest -q
+.\.venv\Scripts\python -m pytest -q -o cache_dir=build/pytest_cache
 ```
 
 CUDA 回归：
@@ -185,7 +185,7 @@ $env:MINI_ENGINE_TEST_CUDA = "1"
 .\.venv\Scripts\python -m pytest -q -o cache_dir=build/pytest_cache
 ```
 
-本机最终回归`325 passed, 2 warnings`，CUDA与HTTP测试实际执行；完整0.6B在BF16、FP16 dandan、W4A16三种模式的分块/共享前缀与batch2/4 Graph验收通过，BF16另有真实HTTP/SSE验收。后端数值验收可运行：
+2026-10-25本机全量回归为`403 passed, 2 warnings`，CUDA与HTTP测试实际执行；本轮重新验证完整0.6B BF16的分块/共享前缀、batch2/4 eager/Graph与并发HTTP/SSE，关闭后页引用归零。FP16 dandan和W4A16完整模型的既有验收记录保留原范围，详见[系统验证与性能评测](reports/VALIDATION_AND_BENCHMARKS.md)。后端数值验收可运行：
 
 ```powershell
 .\.venv\Scripts\python benchmarks\validate_dandan_qwen3.py `
@@ -194,6 +194,8 @@ $env:MINI_ENGINE_TEST_CUDA = "1"
 ```
 
 该验收区分量化变化和相同权重下的kernel误差。INT4可能改变模型输出，仍需评估任务质量。
+
+启动配置、服务分层、资源清理与安装包检查的本轮证据见[结构维护验收摘要](reports/structure_validation_summary.json)。本轮未重新测量性能，不从结构调整推导加速比。
 
 ## 性能 Benchmark
 
@@ -321,11 +323,16 @@ HTTP工具记录实际usage、TTFT、TPOT估计、P50/P95、失败和吞吐；st
 
 ```text
 mini_engine/
+├── __main__.py     单请求/Chat 命令行入口
+├── cli.py          两个入口共享的模型启动参数与配置转换
+├── config.py       RunnerConfig 静态约束；QuantConfig 精度约定
 ├── cache/          Paged KV Cache、block allocator、prefix cache
 ├── engine/         scheduler、request、batch runtime、CUDA Graph buckets
 ├── kernels/        PyTorch fallback、CUDA dispatch 和 .cu 源码
-├── model/          Qwen3 reference/native forward 和 runner
-└── quantization/   INT8/INT4/FP8 reference 后端
+├── model/          Qwen3 forward、runner 和公共生成结果 outputs.py
+├── quantization/   INT8/INT4/FP8 reference 与 dandan W4A16 bridge
+├── serving/        protocol 请求校验、service 推理 worker、http JSON/SSE
+└── server.py       HTTP 命令行入口与兼容导出
 
 benchmarks/         单算子、单请求和 batch benchmark
 tests/              CPU、CUDA、模型对齐和 runtime 回归
@@ -333,11 +340,15 @@ reports/            主题技术报告和实验摘要，入口README.md
 PROJECT_STATUS.md   当前项目总览、已实现能力和后续方向
 ```
 
+单请求/Chat经`__main__.py → cli.py/RunnerConfig → NativeQwen3Runner.generate_incremental → NativeQwen3`执行；HTTP经`server.py → serving.http → InferenceService → NativeBatchRuntime → Scheduler/NativeQwen3`执行。两者共享模型和算子，保留各自的生成循环；`server.py`继续兼容原有启动命令与类导入。
+
+调用方用`finally`关闭自己创建的执行会话：HTTP worker关闭batch runtime，归还请求页、Prefix引用及自有Graph scratch；随后服务入口关闭runner。CLI退出关闭runner的Chat Graph和scratch。模型权重及KV tensor仍由runner持有，外部提供的Graph manager和padding页按借用关系处理，详见[架构与生命周期](reports/ARCHITECTURE.md)。2026-10-25本轮以结构维护为目标，Qwen3.5等新架构和脱离Transformers的独立权重加载器暂缓。
+
 ## 当前限制
 
 - chunked prefill已完成；多个请求的prompt尚未打包为同一ragged batch，suffix验证仍需gather KV；
 - Prefix只复用完整block；为防止KV耗尽采用保守最大预算预留，尚无preemption；
-- CUDA Graph 当前重点是 batch decode，sampling 仍在 Graph 外；
+- CUDA Graph 覆盖单请求/Chat与batch的一token decode和greedy采样；prefill、CPU调度、EOS判断与文本处理在图外，非greedy batch采样也在图外；
 - W4A16 已有可选 CUDA 后端，量化质量和多形状性能仍需评估；FP8 GEMM、FP8/INT8 KV、NVFP4/MXFP8 尚未完成；
 - HTTP/SSE为本地greedy接口子集；尚无多机服务、安全网关和结构化输出；
 - 投机仅greedy prompt lookup；小draft、EAGLE/MTP/DFlash、随机接受概率校正尚未实现；

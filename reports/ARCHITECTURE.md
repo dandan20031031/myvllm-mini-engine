@@ -1,31 +1,50 @@
 # 推理引擎架构与实现
 
-截至2026-10-24，整合原阶段00–29的实现说明。范围为Windows 11单GPU、Qwen3-0.6B；HuggingFace负责权重加载、tokenizer和正确性参考，native forward、缓存、调度与CUDA扩展由项目实现。运行命令见 [项目 README](../README.md)，证据见 [系统验证与性能评测](VALIDATION_AND_BENCHMARKS.md)。
+更新至2026-10-25，整合原阶段00–29及本轮结构维护的实现说明。范围为Windows 11单GPU、Qwen3-0.6B；HuggingFace负责权重加载、tokenizer和正确性参考，native forward、缓存、调度与CUDA扩展由项目实现。运行命令见 [项目 README](../README.md)，证据见 [系统验证与性能评测](VALIDATION_AND_BENCHMARKS.md)。
 
 ## 调用链与代码入口
 
 ```text
+启动: __main__.main / server.main -> cli -> RunnerConfig -> NativeQwen3Runner.from_pretrained
+
 CLI / Chat -> NativeQwen3Runner.generate_incremental -> NativeQwen3 / DecodeGraphBucket
-HTTP -> InferenceService单GPU worker -> NativeBatchRuntime.step -> Scheduler
-                                       |                         |
-                                 NativeQwen3                GenerationRequest
-                                       |                         |
-                                  KVCachePool <--------- BlockManager / PrefixCache
-                                       |
-                        CUDA kernels / cuBLAS / optional dandan_ops
+
+HTTP -> serving.http -> InferenceService.submit -> 单GPU worker._run
+                                                       |
+                                      NativeBatchRuntime.step -> Scheduler
+                                               |                    |
+                                          NativeQwen3         GenerationRequest
+                                               |                    |
+                                          KVCachePool <- BlockManager / PrefixCache
+
+共同后端: CUDA kernels / cuBLAS / optional dandan_ops
 ```
 
 两条生成路径共享模型、KV与算子实现，但CLI/Chat直接执行单请求循环，HTTP/batch经调度runtime执行；不能把示意图理解为所有入口已收敛到同一个执行循环。`engine/llm_engine.py`保留早期facade/reference接口，并非当前原生Chat和服务的必经热路径。
 
 | 入口 | 职责 |
 |---|---|
-| `mini_engine/model/native_runner.py` | 加载、配置校验、单请求生成、创建batch runtime |
+| `mini_engine/config.py`、`cli.py` | RunnerConfig静态约束、共享启动参数与转换；不执行模型加载或请求调度 |
+| `mini_engine/__main__.py`、`server.py` | 应用参数、启动/退出；server保留原模块的公共导入兼容性 |
+| `mini_engine/model/native_runner.py` | 加载、硬件/后端能力校验、单请求生成、创建batch会话、Chat Graph生命周期 |
+| `mini_engine/model/outputs.py` | native与Transformers reference共用的生成结果值类型 |
 | `mini_engine/model/native_qwen3.py` | Embedding、Q/K RMSNorm、RoPE、GQA、SwiGLU及prefill/decode/suffix forward |
 | `mini_engine/cache/` | 物理页引用、逻辑块表、KV tensor和完整prefix索引 |
 | `mini_engine/engine/request.py`、`scheduler.py`、`runtime.py` | 请求状态、token预算、decode优先执行、采样与回收 |
 | `mini_engine/engine/cuda_graph.py` | 固定形状bucket、scratch页、capture/replay |
 | `mini_engine/kernels/`、`quantization/` | Torch reference、CUDA与可选dandan后端 |
-| `mini_engine/speculative.py`、`server.py` | 单请求greedy投机、HTTP/SSE及worker生命周期 |
+| `mini_engine/speculative.py` | 单请求greedy投机、提案与验证、KV逻辑回退 |
+| `mini_engine/serving/protocol.py` | 聊天子集字段校验与APIError；不调用tokenizer/model |
+| `mini_engine/serving/service.py` | 请求队列、单GPU worker、tokenizer、runtime、取消与退出 |
+| `mini_engine/serving/http.py` | HTTP连接限流、路由、JSON/SSE编码与断线检测 |
+
+### 2026-10-25结构维护记录
+
+启动参数由`add_runner_arguments()`统一注册，经`runner_config_from_args()`生成不可变`RunnerConfig`，再由`runner_kwargs()`转换为既有`from_pretrained()`参数。配置仅校验静态组合；CUDA设备、算子库版本及模型head_dim等能力检查继续在runner/backend执行。CLI与HTTP保留各自的生成上限、队列及超时参数，服务只暴露其支持的参数子集，不能把共享注册理解为两个入口支持全部相同模式。
+
+`IncrementalGenerationResult`提取到`model/outputs.py`，native/reference共同引用；没有替换Transformers权重加载流程。服务拆分保持`python -m mini_engine.server`和`from mini_engine.server import APIError, ChatHTTPServer, InferenceService`可用。CLI仍直接运行单请求生成，HTTP worker仍使用batch runtime。
+
+本轮关注模块职责和资源回收，未新增性能结论。全量403项测试及真实BF16模型chunk/prefix/batch2/4 Graph/HTTP-SSE验收通过，详见[结构维护验收](VALIDATION_AND_BENCHMARKS.md)及[紧凑摘要](structure_validation_summary.json)；下文历史性能数据仍属于原测量版本。Qwen3.5、混合注意力/多模态和独立权重加载器暂缓。
 
 ## KV所有权、Prefix与调度
 
@@ -84,13 +103,26 @@ W4 bridge不重新量化：将signed nibble映射到unsigned、zero=8，打包�
 
 ## HTTP/SSE与资源生命周期
 
-`server.py`提供 `/health`、`/v1/models`、`/v1/chat/completions`。主线程加载一次模型；单GPU worker负责tokenizer、runtime、调度、KV和模型调用。HTTP线程只校验和收发，经有界提交/结果队列交互，新请求可加入正在decode的runtime。
+`server.py`组装服务并保留兼容入口，路由实现在`serving/http.py`，提供 `/health`、`/v1/models`、`/v1/chat/completions`。`protocol.py`检查请求并构造APIError；`service.py`接收job和运行worker。主线程加载一次模型；单GPU worker负责tokenizer、runtime、调度、KV和模型调用。HTTP线程只校验和收发，经有界提交/结果队列交互，新请求可加入正在decode的runtime。
 
 服务是greedy聊天子集：`temperature=0`，messages接受system/user/assistant非空字符串，未支持字段报400。SSE依次发送role/content、finish、可选 `choices=[]` usage及 `[DONE]`；usage统计实际生成token，包含文本隐藏的特殊token。服务默认仅监听127.0.0.1，无认证/TLS或多租户隔离；没有tools、多模态、随机采样或服务端会话记忆。
 
 默认推理请求上限32、每请求结果队列32、HTTP连接线程64、body 1MiB、messages 128项、socket超时5秒、请求超时120秒、max_tokens上限512，均受配置及上下文/KV约束。Graph开启后还受bucket并发和上下文覆盖范围约束。
 
-断线、慢消费者和超时触发worker取消并回收页；慢SSE不会阻塞GPU worker。输入错误只终止对应请求，无法归因的batch执行异常终止整个active batch；不可恢复GPU错误可能需重启。关闭时释放active/waiting、Prefix pin和Graph scratch引用，正在执行的CUDA kernel须返回后才能完成退出。
+断线、慢消费者和超时触发worker取消并回收页；慢SSE不会阻塞GPU worker。输入错误只终止对应请求，无法归因的batch执行异常终止整个active batch；不可恢复GPU错误可能需重启。
+
+资源按执行会话明确关闭：
+
+| 所有者 | 创建与清理边界 |
+|---|---|
+| runner | 持有模型、BlockManager和KV tensor；单请求finally释放live请求页，runner.close同步并清理Chat Graph/scratch |
+| batch runtime | 持有本会话scheduler/Prefix状态；close先同步设备，再abort waiting/running、清除Prefix pin、退休自有Graph bucket、释放自建scratch并恢复scheduler回调 |
+| 外部Graph调用方 | 显式传入的Graph manager和padding页为借用；runtime不整体清空外部manager或释放外部页，仅退休绑定本会话自有scratch的bucket并恢复被暂替的旧bucket |
+| service与入口 | worker的finally调用runtime.close；service.close发出停止并join worker，server入口关闭HTTP后再关闭service和runner；CLI入口finally关闭runner |
+
+runtime.close可重复调用，关闭后不再接受step；它不销毁runner的模型权重和KV tensor。外部仍持有的退休bucket引用不能继续replay。共享manager/allocator不得由两个runtime并发使用，复用runner前须先关闭前一会话。service.close在worker超时未退出时报告错误，调用方不能继续释放它使用中的buffer；CUDA kernel执行完毕才可完成清理。启动中途失败也走入口finally，创建batch会话失败时释放已分配的自有scratch。
+
+`benchmark_native_batch.py`、`profile_native_batch.py`与`validate_system_extensions.py`也采用相同关闭接口，不再操作Graph scratch的内部owner名称。benchmark重复间仍清空Prefix以固定工作量，最终close在计时之外；profiler先退出插桩上下文、恢复方法和hook，再关闭runtime。注入构造、分词、执行错误的回归验证了这些边界。
 
 ## 与vLLM、SGLang的框架及源码对照
 
@@ -104,7 +136,7 @@ vLLM V1把请求处理、EngineCore调度、Executor/Worker和ModelRunner分层�
 
 | 对照点 | vLLM所读实现 | SGLang所读实现 | 本项目当前实现与取舍 |
 |---|---|---|---|
-| 请求执行 | [`EngineCore.step/step_with_batch_queue`](https://github.com/vllm-project/vllm/blob/5f63ea461ccd567ece6f50dd3701430c0f321039/vllm/v1/engine/core.py#L657) 经Executor执行，支持非阻塞调用与在途批次 | [`Scheduler.event_loop_normal/overlap`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/managers/scheduler.py#L1995) 管接收、选批、执行与结果处理 | [`InferenceService._run`](../mini_engine/server.py) 同步推进runtime；HTTP线程与GPU worker已经分开，但没有CPU调度与GPU批次执行的完整overlap |
+| 请求执行 | [`EngineCore.step/step_with_batch_queue`](https://github.com/vllm-project/vllm/blob/5f63ea461ccd567ece6f50dd3701430c0f321039/vllm/v1/engine/core.py#L657) 经Executor执行，支持非阻塞调用与在途批次 | [`Scheduler.event_loop_normal/overlap`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/managers/scheduler.py#L1995) 管接收、选批、执行与结果处理 | [`InferenceService._run`](../mini_engine/serving/service.py) 同步推进runtime；HTTP线程与GPU worker已经分开，但没有CPU调度与GPU批次执行的完整overlap |
 | 调度模型 | [`Scheduler.schedule`](https://github.com/vllm-project/vllm/blob/5f63ea461ccd567ece6f50dd3701430c0f321039/vllm/v1/core/sched/scheduler.py#L677) 以已计算token与目标token进度统一分配工作，并处理抢占/恢复 | [`PrefillAdder`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/managers/schedule_policy.py#L584) 管输入/chunk/KV等预算，ScheduleBatch支持内存检查与retract | [`Scheduler.schedule`](../mini_engine/engine/scheduler.py) 显式区分decode与prefill，虚拟预留最坏输出增长；设计简单、准入保守，无安全preemption/recompute |
 | 执行批次 | [`GPUModelRunner._prepare_inputs`](https://github.com/vllm-project/vllm/blob/5f63ea461ccd567ece6f50dd3701430c0f321039/vllm/v1/worker/gpu_model_runner.py#L1924) 构造扁平token/query与持久batch metadata | [`ScheduleBatch`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/managers/schedule_batch.py) 准备extend/decode，再转换为执行用ForwardBatch | [`NativeBatchRuntime`](../mini_engine/engine/runtime.py) decode真正成批，prefill chunks仍逐请求执行；需要补执行批次接口后才能做真正ragged prefill |
 | KV与Prefix索引 | [`KVCacheManager`](https://github.com/vllm-project/vllm/blob/5f63ea461ccd567ece6f50dd3701430c0f321039/vllm/v1/core/kv_cache_manager.py#L264) 用block hash和coordinator管理命中、分配与cache groups | [`RadixCache.match_prefix`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/mem_cache/radix_cache.py#L364) 用树段与锁引用管理共享前缀；[`ReqToTokenPool`](https://github.com/sgl-project/sglang/blob/773cb938fe9484a8f7e7e46fb1b1fe96412c59ed/python/sglang/srt/mem_cache/memory_pool.py#L375) 分离请求地址与KV存储 | [`BlockManager`](../mini_engine/cache/block_manager.py) 管页所有权；[`PrefixCache`](../mini_engine/cache/prefix_cache.py) 用完整token tuple、线性最长前缀扫描与LRU。完整命中已实际跳过，不等于hash APC或RadixAttention实现 |

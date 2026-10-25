@@ -165,76 +165,86 @@ def main():
         quant_backend="dandan" if args.quantization == "int4" else "reference",
         quantization=QuantConfig("int4", "fp16") if args.quantization == "int4" else None,
     )
-    required_pages = (args.prompt_tokens + args.max_new_tokens - 2) // args.block_size + 1
-    block_bucket = max(8, 1 << (required_pages - 1).bit_length())
-    batch_bucket = 1 << (args.batch_size - 1).bit_length()
-    runtime = runner.create_batch_runtime(
-        use_cuda_graph=args.cuda_graph, enable_prefix_cache=False,
-        prefill_chunk_size=args.prefill_chunk_size,
-        graph_batch_sizes=(batch_bucket,), graph_block_buckets=(block_bucket,),
-    )
-    runtime.eos_token_ids.clear()
-    source = runner.tokenizer.apply_chat_template([{"role": "user", "content": "Explain KV Cache in one sentence."}],
-        tokenize=True, add_generation_prompt=True, enable_thinking=False)
-    prompt = (source * ((args.prompt_tokens + len(source) - 1) // len(source)))[:args.prompt_tokens]
-    prompts = [prompt for _ in range(args.batch_size)]
-    backend_start = runner.model.backend_report()
-    warmup = [generate(runtime, prompts, args.max_new_tokens) for _ in range(args.warmup)]
-    activities = [torch.profiler.ProfilerActivity.CPU]
-    supported = torch.profiler.supported_activities()
-    if is_cuda and torch.profiler.ProfilerActivity.CUDA in supported:
-        activities.append(torch.profiler.ProfilerActivity.CUDA)
-    profiler = torch.profiler.profile(activities=activities, record_shapes=args.shapes,
-        profile_memory=args.memory, with_stack=args.stacks) if args.tool == "torch" else nullcontext()
-    api = torch.cuda.cudart() if args.cuda_profiler_api else None
+    runtime = None
     try:
-        if api is not None:
-            torch.cuda.check_error(api.cudaProfilerStart())
-        with profiler as prof, instrument_runtime(runtime, nvtx=is_cuda, record=args.tool == "torch", layers=args.layers):
-            with marked_range("engine/generation", nvtx=is_cuda, record=args.tool == "torch"):
-                result = generate(runtime, prompts, args.max_new_tokens, markers=True,
-                                  nvtx=is_cuda, record=args.tool == "torch")
+        required_pages = (args.prompt_tokens + args.max_new_tokens - 2) // args.block_size + 1
+        block_bucket = max(8, 1 << (required_pages - 1).bit_length())
+        batch_bucket = 1 << (args.batch_size - 1).bit_length()
+        runtime = runner.create_batch_runtime(
+            use_cuda_graph=args.cuda_graph, enable_prefix_cache=False,
+            prefill_chunk_size=args.prefill_chunk_size,
+            graph_batch_sizes=(batch_bucket,), graph_block_buckets=(block_bucket,),
+        )
+        runtime.eos_token_ids.clear()
+        source = runner.tokenizer.apply_chat_template([{"role": "user", "content": "Explain KV Cache in one sentence."}],
+            tokenize=True, add_generation_prompt=True, enable_thinking=False)
+        prompt = (source * ((args.prompt_tokens + len(source) - 1) // len(source)))[:args.prompt_tokens]
+        prompts = [prompt for _ in range(args.batch_size)]
+        backend_start = runner.model.backend_report()
+        warmup = [generate(runtime, prompts, args.max_new_tokens) for _ in range(args.warmup)]
+        activities = [torch.profiler.ProfilerActivity.CPU]
+        supported = torch.profiler.supported_activities()
+        if is_cuda and torch.profiler.ProfilerActivity.CUDA in supported:
+            activities.append(torch.profiler.ProfilerActivity.CUDA)
+        profiler = torch.profiler.profile(activities=activities, record_shapes=args.shapes,
+            profile_memory=args.memory, with_stack=args.stacks) if args.tool == "torch" else nullcontext()
+        api = torch.cuda.cudart() if args.cuda_profiler_api else None
+        try:
+            if api is not None:
+                torch.cuda.check_error(api.cudaProfilerStart())
+            with profiler as prof, instrument_runtime(runtime, nvtx=is_cuda, record=args.tool == "torch", layers=args.layers):
+                with marked_range("engine/generation", nvtx=is_cuda, record=args.tool == "torch"):
+                    result = generate(runtime, prompts, args.max_new_tokens, markers=True,
+                                      nvtx=is_cuda, record=args.tool == "torch")
+        finally:
+            if api is not None:
+                torch.cuda.check_error(api.cudaProfilerStop())
+        metadata = {"scope": "Instrumented warmed runtime, not a latency benchmark; excludes load/tokenization/capture.",
+            "configuration": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
+            "os": platform.platform(), "torch": torch.__version__, "torch_cuda": torch.version.cuda,
+            "gpu": torch.cuda.get_device_name() if is_cuda else None,
+            "supported_activities": [str(activity) for activity in supported],
+            "captured_graph_buckets": [vars(shape) for shape, bucket in runtime.graph_manager.buckets.items() if bucket.captured] if runtime.graph_manager else [],
+            "warmup_median_ms_not_a_benchmark": statistics.median(row["wall_ms"] for row in warmup),
+            "profiled_generation": result, "output_matches_warmup": all(row["output_sha256"] == result["output_sha256"] for row in warmup),
+            "backend_report_start": backend_start, "backend_report_end": runner.model.backend_report(),
+            "notes": ["CUDA Graph replay has no Python per-layer execution. Use nsys node tracing to inspect captured kernels.",
+                      "CPU and device durations overlap; inclusive parent ranges double count children.",
+                      "Synthetic repeated tokenized prompt, fixed output count, prefix reuse disabled."]}
+        if args.tool == "torch":
+            prof.export_chrome_trace(str(args.output_dir / "trace.json"))
+            averages = prof.key_averages(group_by_input_shape=args.shapes)
+            table = averages.table(sort_by="self_cpu_time_total", row_limit=30) + "\n" + averages.table(sort_by="self_device_time_total", row_limit=30)
+            (args.output_dir / "operators.txt").write_text(table, encoding="utf-8")
+            rows = [event_row(event) for event in averages]
+            metadata["top_cpu"] = sorted(rows, key=lambda row: row["self_cpu_us"], reverse=True)[:30]
+            metadata["top_device"] = sorted(rows, key=lambda row: row["self_device_us"], reverse=True)[:30]
+            trace = json.loads((args.output_dir / "trace.json").read_text(encoding="utf-8"))
+            kernels = [event for event in trace.get("traceEvents", []) if event.get("cat", "").lower() == "kernel" and "dur" in event]
+            metadata["cuda_kernel_events_in_trace"] = len(kernels)
+            metadata["device_timeline_available"] = metadata["cuda_kernel_events_in_trace"] > 0
+            # CUDA user annotations also appear as device events. They enclose
+            # physical kernels, so summing all key_averages device times would
+            # double count. Keep a separate table of physical kernel durations.
+            totals = defaultdict(lambda: {"calls": 0, "total_us": 0.0})
+            for kernel in kernels:
+                totals[kernel["name"]]["calls"] += 1
+                totals[kernel["name"]]["total_us"] += kernel["dur"]
+            metadata["physical_kernel_total_us"] = sum(value["total_us"] for value in totals.values())
+            metadata["top_physical_kernels"] = sorted(
+                [{"name": name, **value} for name, value in totals.items()],
+                key=lambda value: value["total_us"], reverse=True)[:30]
+            print(table)
+        (args.output_dir / "summary.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"wrote profiling artifacts to {args.output_dir}")
     finally:
-        if api is not None:
-            torch.cuda.check_error(api.cudaProfilerStop())
-    metadata = {"scope": "Instrumented warmed runtime, not a latency benchmark; excludes load/tokenization/capture.",
-        "configuration": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
-        "os": platform.platform(), "torch": torch.__version__, "torch_cuda": torch.version.cuda,
-        "gpu": torch.cuda.get_device_name() if is_cuda else None,
-        "supported_activities": [str(activity) for activity in supported],
-        "captured_graph_buckets": [vars(shape) for shape, bucket in runtime.graph_manager.buckets.items() if bucket.captured] if runtime.graph_manager else [],
-        "warmup_median_ms_not_a_benchmark": statistics.median(row["wall_ms"] for row in warmup),
-        "profiled_generation": result, "output_matches_warmup": all(row["output_sha256"] == result["output_sha256"] for row in warmup),
-        "backend_report_start": backend_start, "backend_report_end": runner.model.backend_report(),
-        "notes": ["CUDA Graph replay has no Python per-layer execution. Use nsys node tracing to inspect captured kernels.",
-                  "CPU and device durations overlap; inclusive parent ranges double count children.",
-                  "Synthetic repeated tokenized prompt, fixed output count, prefix reuse disabled."]}
-    if args.tool == "torch":
-        prof.export_chrome_trace(str(args.output_dir / "trace.json"))
-        averages = prof.key_averages(group_by_input_shape=args.shapes)
-        table = averages.table(sort_by="self_cpu_time_total", row_limit=30) + "\n" + averages.table(sort_by="self_device_time_total", row_limit=30)
-        (args.output_dir / "operators.txt").write_text(table, encoding="utf-8")
-        rows = [event_row(event) for event in averages]
-        metadata["top_cpu"] = sorted(rows, key=lambda row: row["self_cpu_us"], reverse=True)[:30]
-        metadata["top_device"] = sorted(rows, key=lambda row: row["self_device_us"], reverse=True)[:30]
-        trace = json.loads((args.output_dir / "trace.json").read_text(encoding="utf-8"))
-        kernels = [event for event in trace.get("traceEvents", []) if event.get("cat", "").lower() == "kernel" and "dur" in event]
-        metadata["cuda_kernel_events_in_trace"] = len(kernels)
-        metadata["device_timeline_available"] = metadata["cuda_kernel_events_in_trace"] > 0
-        # CUDA user annotations also appear as device events. They enclose
-        # physical kernels, so summing all key_averages device times would
-        # double count. Keep a separate table of physical kernel durations.
-        totals = defaultdict(lambda: {"calls": 0, "total_us": 0.0})
-        for kernel in kernels:
-            totals[kernel["name"]]["calls"] += 1
-            totals[kernel["name"]]["total_us"] += kernel["dur"]
-        metadata["physical_kernel_total_us"] = sum(value["total_us"] for value in totals.values())
-        metadata["top_physical_kernels"] = sorted(
-            [{"name": name, **value} for name, value in totals.items()],
-            key=lambda value: value["total_us"], reverse=True)[:30]
-        print(table)
-    (args.output_dir / "summary.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"wrote profiling artifacts to {args.output_dir}")
+        # instrument_runtime/profiler contexts unwind before resource cleanup.
+        try:
+            if runtime is not None:
+                runtime.close()
+        finally:
+            runner.close()
+
 
 
 if __name__ == "__main__":

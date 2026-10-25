@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import closing, contextmanager, ExitStack
 import gc
 import json
 from pathlib import Path
@@ -118,8 +118,7 @@ def cleanup(runtime):
     manager = runtime.scheduler.block_manager
     require(not runtime.scheduler.running and not runtime.scheduler.waiting, "runtime still has live requests")
     cache_pins_before_clear = manager.used_blocks
-    runtime.prefix_cache.clear()
-    manager.release("__graph_padding__")
+    runtime.close()
     require(manager.free_blocks == manager.num_blocks, "allocator page references leaked after cache/scratch cleanup")
     return {"used_blocks_before_cache_clear": cache_pins_before_clear,
             "used_blocks_after_cleanup": manager.used_blocks,
@@ -129,17 +128,18 @@ def cleanup(runtime):
 def validate_chunks(base, args, ids):
     runs = []
     for chunked in (False, True):
-        runner = fresh_runner(base, args)
-        runtime = create_runtime(runner, args, chunked=chunked, maximum_prompt=len(ids))
-        with counted_prefill(base.model) as chunks:
-            requests, steps = execute(runtime, [ids], args.max_new_tokens)
-        require(sum(row["tokens"] for row in chunks) == len(ids), "chunking recomputed or skipped prompt tokens")
-        if chunked:
-            require(all(row["tokens"] <= args.chunk_size for row in chunks), "prefill chunk exceeded its size limit")
-        runs.append({"chunked": chunked, "output_token_ids": requests[0].output_token_ids,
-                     "steps": steps, "prefill_chunks": chunks,
-                     "computed_prompt_tokens": sum(row["tokens"] for row in chunks),
-                     "allocator": cleanup(runtime)})
+        with ExitStack() as resources:
+            runner = resources.enter_context(closing(fresh_runner(base, args)))
+            runtime = resources.enter_context(closing(create_runtime(runner, args, chunked=chunked, maximum_prompt=len(ids))))
+            with counted_prefill(base.model) as chunks:
+                requests, steps = execute(runtime, [ids], args.max_new_tokens)
+            require(sum(row["tokens"] for row in chunks) == len(ids), "chunking recomputed or skipped prompt tokens")
+            if chunked:
+                require(all(row["tokens"] <= args.chunk_size for row in chunks), "prefill chunk exceeded its size limit")
+            runs.append({"chunked": chunked, "output_token_ids": requests[0].output_token_ids,
+                         "steps": steps, "prefill_chunks": chunks,
+                         "computed_prompt_tokens": sum(row["tokens"] for row in chunks),
+                         "allocator": cleanup(runtime)})
         del runtime, runner
     require(runs[0]["output_token_ids"] == runs[1]["output_token_ids"], "chunked and unchunked greedy outputs differ")
     return {"passed": True, "output_match": True, "runs": runs}
@@ -155,47 +155,48 @@ def prefix_unchanged(runtime, blocks, snapshot):
 
 
 def validate_prefix(base, args, ids, suffix):
-    runner = fresh_runner(base, args)
-    runtime = create_runtime(runner, args, chunked=False, prefix=True, maximum_prompt=len(ids) + len(suffix))
-    with counted_prefill(base.model) as cold_chunks:
-        cold, _ = execute(runtime, [ids], args.max_new_tokens, request_prefix="cold")
-    require(sum(row["tokens"] for row in cold_chunks) == len(ids), "cold prefix did not compute the expected prompt")
-    entry = runtime.prefix_cache.lookup(ids)
-    require(entry is not None and len(entry.token_key) == len(ids), "aligned prompt was not retained as a complete prefix")
-    require(entry.next_logits is not None, "aligned prefix has no boundary logits")
-    pages = list(entry.block_ids)
-    saved = snapshot_prefix(runtime, pages)
-    for page in pages:
-        require(runner.block_manager.refcount(page) >= 1, "cached prefix page lost its pin")
-    with counted_prefill(base.model) as warm_chunks:
-        warm, _ = execute(runtime, [ids], args.max_new_tokens, request_prefix="warm")
-    require(not warm_chunks, "exact prefix hit executed a model prompt forward")
-    require(warm[0].prefix_len == len(ids), "exact-hit prefix length differs from prompt length")
-    require(cold[0].output_token_ids == warm[0].output_token_ids, "cold/warm prefix outputs differ")
-    require(prefix_unchanged(runtime, pages, saved), "exact hit overwrote shared prefix KV")
+    with ExitStack() as resources:
+        runner = resources.enter_context(closing(fresh_runner(base, args)))
+        runtime = resources.enter_context(closing(create_runtime(runner, args, chunked=False, prefix=True, maximum_prompt=len(ids) + len(suffix))))
+        with counted_prefill(base.model) as cold_chunks:
+            cold, _ = execute(runtime, [ids], args.max_new_tokens, request_prefix="cold")
+        require(sum(row["tokens"] for row in cold_chunks) == len(ids), "cold prefix did not compute the expected prompt")
+        entry = runtime.prefix_cache.lookup(ids)
+        require(entry is not None and len(entry.token_key) == len(ids), "aligned prompt was not retained as a complete prefix")
+        require(entry.next_logits is not None, "aligned prefix has no boundary logits")
+        pages = list(entry.block_ids)
+        saved = snapshot_prefix(runtime, pages)
+        for page in pages:
+            require(runner.block_manager.refcount(page) >= 1, "cached prefix page lost its pin")
+        with counted_prefill(base.model) as warm_chunks:
+            warm, _ = execute(runtime, [ids], args.max_new_tokens, request_prefix="warm")
+        require(not warm_chunks, "exact prefix hit executed a model prompt forward")
+        require(warm[0].prefix_len == len(ids), "exact-hit prefix length differs from prompt length")
+        require(cold[0].output_token_ids == warm[0].output_token_ids, "cold/warm prefix outputs differ")
+        require(prefix_unchanged(runtime, pages, saved), "exact hit overwrote shared prefix KV")
 
-    with counted_prefill(base.model) as partial_chunks:
-        partial, _ = execute(runtime, [ids + suffix], args.max_new_tokens, request_prefix="partial")
-    partial_count = sum(row["tokens"] for row in partial_chunks)
-    require(partial_count == len(suffix), "partial prefix hit did not compute exactly its suffix")
-    require(partial_chunks[0]["position"] == len(ids), "partial prefix started at the wrong absolute position")
-    require(prefix_unchanged(runtime, pages, saved), "partial hit overwrote shared prefix KV")
+        with counted_prefill(base.model) as partial_chunks:
+            partial, _ = execute(runtime, [ids + suffix], args.max_new_tokens, request_prefix="partial")
+        partial_count = sum(row["tokens"] for row in partial_chunks)
+        require(partial_count == len(suffix), "partial prefix hit did not compute exactly its suffix")
+        require(partial_chunks[0]["position"] == len(ids), "partial prefix started at the wrong absolute position")
+        require(prefix_unchanged(runtime, pages, saved), "partial hit overwrote shared prefix KV")
 
-    other = fresh_runner(base, args)
-    cold_runtime = create_runtime(other, args, chunked=False, maximum_prompt=len(ids) + len(suffix))
-    reference, _ = execute(cold_runtime, [ids + suffix], args.max_new_tokens, request_prefix="partial-reference")
-    require(partial[0].output_token_ids == reference[0].output_token_ids, "partial hit and cold suffix outputs differ")
-    result = {
-        "passed": True, "cold_computed_prompt_tokens": sum(row["tokens"] for row in cold_chunks),
-        "warm_computed_prompt_tokens": 0, "partial_computed_prompt_tokens": partial_count,
-        "prefix_tokens": len(ids), "suffix_tokens": len(suffix),
-        "cold_output_token_ids": cold[0].output_token_ids, "warm_output_token_ids": warm[0].output_token_ids,
-        "partial_output_token_ids": partial[0].output_token_ids,
-        "partial_reference_output_token_ids": reference[0].output_token_ids,
-        "shared_kv_unchanged": True, "warm_chunks": warm_chunks, "partial_chunks": partial_chunks,
-        "allocator": cleanup(runtime), "cold_reference_allocator": cleanup(cold_runtime),
-    }
-    return result
+        other = resources.enter_context(closing(fresh_runner(base, args)))
+        cold_runtime = resources.enter_context(closing(create_runtime(other, args, chunked=False, maximum_prompt=len(ids) + len(suffix))))
+        reference, _ = execute(cold_runtime, [ids + suffix], args.max_new_tokens, request_prefix="partial-reference")
+        require(partial[0].output_token_ids == reference[0].output_token_ids, "partial hit and cold suffix outputs differ")
+        result = {
+            "passed": True, "cold_computed_prompt_tokens": sum(row["tokens"] for row in cold_chunks),
+            "warm_computed_prompt_tokens": 0, "partial_computed_prompt_tokens": partial_count,
+            "prefix_tokens": len(ids), "suffix_tokens": len(suffix),
+            "cold_output_token_ids": cold[0].output_token_ids, "warm_output_token_ids": warm[0].output_token_ids,
+            "partial_output_token_ids": partial[0].output_token_ids,
+            "partial_reference_output_token_ids": reference[0].output_token_ids,
+            "shared_kv_unchanged": True, "warm_chunks": warm_chunks, "partial_chunks": partial_chunks,
+            "allocator": cleanup(runtime), "cold_reference_allocator": cleanup(cold_runtime),
+        }
+        return result
 
 
 def validate_graphs(base, args, ids):
@@ -204,20 +205,21 @@ def validate_graphs(base, args, ids):
         prompts = [ids[:max(2, len(ids) - i * 3)] for i in range(batch)]
         modes = []
         for graphs in (False, True):
-            runner = fresh_runner(base, args)
-            runtime = create_runtime(runner, args, chunked=True, graphs=graphs, maximum_prompt=max(map(len, prompts)))
-            with counted_prefill(base.model) as chunks:
-                requests, steps = execute(runtime, prompts, args.max_new_tokens)
-            require(sum(row["tokens"] for row in chunks) == sum(map(len, prompts)), "batched prompt token accounting differs")
-            captured = [] if runtime.graph_manager is None else [
-                {"batch_size": shape.batch_size, "max_blocks": shape.max_blocks, "captured": bucket.captured}
-                for shape, bucket in runtime.graph_manager.buckets.items()]
-            if graphs:
-                require(captured and all(row["captured"] for row in captured), "graph mode did not capture real decode buckets")
-            modes.append({"mode": "graph" if graphs else "eager", "steps": steps,
-                          "output_token_ids": [request.output_token_ids for request in requests],
-                          "computed_prompt_tokens": sum(row["tokens"] for row in chunks),
-                          "captured_buckets": captured, "allocator": cleanup(runtime)})
+            with ExitStack() as resources:
+                runner = resources.enter_context(closing(fresh_runner(base, args)))
+                runtime = resources.enter_context(closing(create_runtime(runner, args, chunked=True, graphs=graphs, maximum_prompt=max(map(len, prompts)))))
+                with counted_prefill(base.model) as chunks:
+                    requests, steps = execute(runtime, prompts, args.max_new_tokens)
+                require(sum(row["tokens"] for row in chunks) == sum(map(len, prompts)), "batched prompt token accounting differs")
+                captured = [] if runtime.graph_manager is None else [
+                    {"batch_size": shape.batch_size, "max_blocks": shape.max_blocks, "captured": bucket.captured}
+                    for shape, bucket in runtime.graph_manager.buckets.items()]
+                if graphs:
+                    require(captured and all(row["captured"] for row in captured), "graph mode did not capture real decode buckets")
+                modes.append({"mode": "graph" if graphs else "eager", "steps": steps,
+                              "output_token_ids": [request.output_token_ids for request in requests],
+                              "computed_prompt_tokens": sum(row["tokens"] for row in chunks),
+                              "captured_buckets": captured, "allocator": cleanup(runtime)})
             del runtime, runner
             gc.collect()
         require(modes[0]["output_token_ids"] == modes[1]["output_token_ids"], f"batch={batch} eager/graph outputs differ")
@@ -228,63 +230,63 @@ def validate_graphs(base, args, ids):
 def validate_http(base, args):
     from mini_engine.server import ChatHTTPServer, InferenceService
 
-    runner = fresh_runner(base, args)
-    service = InferenceService(runner, model_name="validation-qwen3", request_timeout=180,
-                               max_new_tokens=args.max_new_tokens, use_cuda_graph=False,
-                               enable_prefix_cache=True, prefill_chunk_size=args.chunk_size,
-                               max_num_batched_tokens=args.token_budget).start()
-    server = ChatHTTPServer(("127.0.0.1", 0), service)
-    thread = threading.Thread(target=server.serve_forever, name="validation-http", daemon=True)
-    thread.start()
-    url = f"http://127.0.0.1:{server.server_port}/v1/chat/completions"
+    with ExitStack() as resources:
+        runner = resources.enter_context(closing(fresh_runner(base, args)))
+        service = InferenceService(runner, model_name="validation-qwen3", request_timeout=180,
+                                   max_new_tokens=args.max_new_tokens, use_cuda_graph=False,
+                                   enable_prefix_cache=True, prefill_chunk_size=args.chunk_size,
+                                   max_num_batched_tokens=args.token_budget)
+        resources.callback(service.close, timeout=30)
+        service.start()
+        server = ChatHTTPServer(("127.0.0.1", 0), service)
+        resources.callback(server.server_close)
+        thread = threading.Thread(target=server.serve_forever, name="validation-http", daemon=True)
+        thread.start()
+        resources.callback(thread.join, 10)
+        resources.callback(server.shutdown)
+        url = f"http://127.0.0.1:{server.server_port}/v1/chat/completions"
 
-    def request(stream):
-        payload = {"model": "validation-qwen3", "messages": [{"role": "user", "content": "Explain what a KV cache stores in one sentence."}],
-                   "max_tokens": args.max_new_tokens, "temperature": 0, "stream": stream}
-        if stream:
-            payload["stream_options"] = {"include_usage": True}
-        wire = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(wire, timeout=240) as response:
-            require(response.status == 200, "HTTP validation request was unsuccessful")
-            if not stream:
-                result = json.load(response)
-                usage = result["usage"]
-                text = result["choices"][0]["message"]["content"]
-                finish_reason = result["choices"][0]["finish_reason"]
-            else:
-                events, done, text, usage, finish_reason = [], False, "", None, None
-                for line in response:
-                    line = line.decode("utf-8").strip()
-                    if not line.startswith("data: "):
-                        continue
-                    value = line[6:]
-                    if value == "[DONE]":
-                        done = True
-                        break
-                    event = json.loads(value)
-                    require("error" not in event, "SSE returned an error event")
-                    events.append(event)
-                    if event.get("usage") is not None:
-                        usage = event["usage"]
-                    for choice in event.get("choices", []):
-                        text += choice.get("delta", {}).get("content", "")
-                        finish_reason = choice.get("finish_reason") or finish_reason
-                require(done and events, "SSE omitted its final DONE marker or content events")
-                require(usage is not None, "SSE include_usage omitted token accounting")
-        require(usage["completion_tokens"] == args.max_new_tokens, "HTTP completion token count differs from emitted fixed-length output")
-        require(usage["prompt_tokens"] > 0 and usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"], "invalid HTTP usage accounting")
-        require(isinstance(text, str) and finish_reason == "length", "HTTP output lacks text or a normal length finish")
-        return {"stream": stream, "usage": usage, "text": text, "finish_reason": finish_reason}
+        def request(stream):
+            payload = {"model": "validation-qwen3", "messages": [{"role": "user", "content": "Explain what a KV cache stores in one sentence."}],
+                       "max_tokens": args.max_new_tokens, "temperature": 0, "stream": stream}
+            if stream:
+                payload["stream_options"] = {"include_usage": True}
+            wire = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(wire, timeout=240) as response:
+                require(response.status == 200, "HTTP validation request was unsuccessful")
+                if not stream:
+                    result = json.load(response)
+                    usage = result["usage"]
+                    text = result["choices"][0]["message"]["content"]
+                    finish_reason = result["choices"][0]["finish_reason"]
+                else:
+                    events, done, text, usage, finish_reason = [], False, "", None, None
+                    for line in response:
+                        line = line.decode("utf-8").strip()
+                        if not line.startswith("data: "):
+                            continue
+                        value = line[6:]
+                        if value == "[DONE]":
+                            done = True
+                            break
+                        event = json.loads(value)
+                        require("error" not in event, "SSE returned an error event")
+                        events.append(event)
+                        if event.get("usage") is not None:
+                            usage = event["usage"]
+                        for choice in event.get("choices", []):
+                            text += choice.get("delta", {}).get("content", "")
+                            finish_reason = choice.get("finish_reason") or finish_reason
+                    require(done and events, "SSE omitted its final DONE marker or content events")
+                    require(usage is not None, "SSE include_usage omitted token accounting")
+            require(usage["completion_tokens"] == args.max_new_tokens, "HTTP completion token count differs from emitted fixed-length output")
+            require(usage["prompt_tokens"] > 0 and usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"], "invalid HTTP usage accounting")
+            require(isinstance(text, str) and finish_reason == "length", "HTTP output lacks text or a normal length finish")
+            return {"stream": stream, "usage": usage, "text": text, "finish_reason": finish_reason}
 
-    try:
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = [pool.submit(request, stream) for stream in (False, True)]
             outputs = [future.result() for future in futures]
-    finally:
-        server.shutdown()
-        service.close(timeout=30)
-        server.server_close()
-        thread.join(10)
     require(not thread.is_alive() and not service.healthy, "HTTP worker/server did not shut down")
     require(runner.block_manager.used_blocks == 0, "HTTP service leaked request/cache/scratch page references")
     return {"passed": True, "requests": outputs, "used_blocks_after_service_close": 0,
@@ -307,36 +309,38 @@ def main():
                "timing_scope": "No performance measurements; do not compare this run to service latency benchmarks", "checks": {}}
     payload["configuration"]["output"] = str(args.output)
     try:
-        base = NativeQwen3Runner.from_pretrained(
-            args.model, device=args.device, dtype={"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[args.dtype],
-            prefill_backend=args.prefill_backend, decode_backend=args.decode_backend,
-            elementwise_backend=args.elementwise_backend, data_backend=args.data_backend, linear_backend=args.linear_backend,
-            sampling_backend=args.sampling_backend, num_blocks=args.num_blocks, block_size=args.block_size,
-            local_files_only=True, fuse_projections=args.fuse_projections,
-            quantization=QuantConfig("int4", activation_dtype=args.dtype, group_size=args.quant_group_size) if args.quantization == "int4" else None,
-            quant_backend=args.quant_backend,
-        )
-        payload["backend_report_start"] = base.model.backend_report()
-        source = base.tokenizer.encode(args.prompt, add_special_tokens=False)
-        require(source, "validation prompt tokenized to an empty sequence")
-        length = max(args.block_size, args.prompt_length // args.block_size * args.block_size)
-        ids = (source * ((length + len(source) - 1) // len(source)))[:length]
-        suffix_source = base.tokenizer.encode(" Add one specific example.", add_special_tokens=False)
-        suffix = suffix_source[:max(2, min(5, args.block_size - 1))]
-        require(suffix, "suffix tokenized to an empty sequence")
-        payload["prompt_token_ids"], payload["suffix_token_ids"] = ids, suffix
-        payload["checks"]["chunked_prefill"] = validate_chunks(base, args, ids)
-        payload["checks"]["prefix_cache"] = validate_prefix(base, args, ids, suffix)
-        if args.skip_graphs:
-            payload["checks"]["graphs"] = {"skipped": True, "reason": "--skip-graphs"}
-        else:
-            require(str(args.device).startswith("cuda"), "graph validation requires CUDA; use --skip-graphs for CPU")
-            payload["checks"]["graphs"] = validate_graphs(base, args, ids)
-        if args.http_smoke:
-            payload["checks"]["http_sse"] = validate_http(base, args)
-        payload["backend_report_end"] = base.model.backend_report()
-        require(payload["backend_report_start"] == payload["backend_report_end"], "backend/library fingerprint changed during validation")
-        payload["passed"] = True
+        with ExitStack() as resources:
+            base = NativeQwen3Runner.from_pretrained(
+                args.model, device=args.device, dtype={"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[args.dtype],
+                prefill_backend=args.prefill_backend, decode_backend=args.decode_backend,
+                elementwise_backend=args.elementwise_backend, data_backend=args.data_backend, linear_backend=args.linear_backend,
+                sampling_backend=args.sampling_backend, num_blocks=args.num_blocks, block_size=args.block_size,
+                local_files_only=True, fuse_projections=args.fuse_projections,
+                quantization=QuantConfig("int4", activation_dtype=args.dtype, group_size=args.quant_group_size) if args.quantization == "int4" else None,
+                quant_backend=args.quant_backend,
+            )
+            resources.callback(base.close)
+            payload["backend_report_start"] = base.model.backend_report()
+            source = base.tokenizer.encode(args.prompt, add_special_tokens=False)
+            require(source, "validation prompt tokenized to an empty sequence")
+            length = max(args.block_size, args.prompt_length // args.block_size * args.block_size)
+            ids = (source * ((length + len(source) - 1) // len(source)))[:length]
+            suffix_source = base.tokenizer.encode(" Add one specific example.", add_special_tokens=False)
+            suffix = suffix_source[:max(2, min(5, args.block_size - 1))]
+            require(suffix, "suffix tokenized to an empty sequence")
+            payload["prompt_token_ids"], payload["suffix_token_ids"] = ids, suffix
+            payload["checks"]["chunked_prefill"] = validate_chunks(base, args, ids)
+            payload["checks"]["prefix_cache"] = validate_prefix(base, args, ids, suffix)
+            if args.skip_graphs:
+                payload["checks"]["graphs"] = {"skipped": True, "reason": "--skip-graphs"}
+            else:
+                require(str(args.device).startswith("cuda"), "graph validation requires CUDA; use --skip-graphs for CPU")
+                payload["checks"]["graphs"] = validate_graphs(base, args, ids)
+            if args.http_smoke:
+                payload["checks"]["http_sse"] = validate_http(base, args)
+            payload["backend_report_end"] = base.model.backend_report()
+            require(payload["backend_report_start"] == payload["backend_report_end"], "backend/library fingerprint changed during validation")
+            payload["passed"] = True
     except Exception as exc:
         payload["error"] = {"type": type(exc).__name__, "message": str(exc), "traceback": traceback.format_exc()}
         raise

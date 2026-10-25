@@ -29,7 +29,8 @@ class NativeBatchRuntime:
     def __init__(self, model, scheduler, cache, *, prefix_cache=None, eos_token_ids=None,
                  graph_manager: DecodeGraphManager | None = None,
                  prefill_chunk_size: int | None = None, enable_prefix_cache=True,
-                 sampling_backend="torch"):
+                 sampling_backend="torch", owns_graph_manager=False,
+                 graph_padding_owner=None):
         self.model = model
         self.scheduler = scheduler
         self.cache = cache
@@ -42,13 +43,94 @@ class NativeBatchRuntime:
         if sampling_backend not in {"torch", "cuda"}:
             raise ValueError("sampling backend must be torch or cuda")
         self.sampling_backend = sampling_backend
+        self._previous_prepare_request = scheduler.prepare_request
+        self._previous_evict_cache = scheduler.evict_cache
         scheduler.prepare_request = self.admit_prefix
         scheduler.evict_cache = self.prefix_cache.evict_until_free
         self.eos_token_ids = {eos_token_ids} if isinstance(eos_token_ids, int) else set(eos_token_ids or [])
         self.graph_manager = graph_manager
         self.graph_padding_block_ids = None
+        self._owns_graph_manager = bool(owns_graph_manager)
+        self._graph_padding_owner = graph_padding_owner
+        self._owned_graph_buckets = {}
+        self._replaced_graph_buckets = {}
+        self._closed = False
+        self._closing = False
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def _ensure_open(self) -> None:
+        if self._closed or self._closing:
+            raise RuntimeError("native batch runtime is closed")
+
+    def close(self) -> None:
+        """Release this session after its owning worker has stopped executing.
+
+        Model weights and KV tensors belong to the runner. A borrowed graph
+        manager and caller-provided scratch pages remain caller-owned. Borrowed
+        managers cannot be used concurrently by another runtime. Buckets using
+        this session's own scratch cannot survive page release.
+        The assigned scheduler and prefix cache belong to this session and
+        must not be shared concurrently; closing aborts and clears them.
+        """
+        if self._closed:
+            return
+        if self._closing:
+            raise RuntimeError("native batch runtime is already closing")
+        self._closing = True
+        try:
+            # Graph replay and metadata H2D can still be queued on another
+            # CUDA stream. Do not recycle pages or drop buffers before it ends.
+            if self.cache.device.type == "cuda":
+                torch.cuda.synchronize(self.cache.device)
+            requests = list(self.scheduler.waiting) + list(self.scheduler.running.values())
+            for request in requests:
+                self.scheduler.abort(request.request_id)
+            self.prefix_cache.clear()
+            manager = self.graph_manager
+            if manager is not None:
+                if self._owns_graph_manager:
+                    for bucket in manager.buckets.values():
+                        self._retire_graph_bucket(bucket)
+                    manager.buckets.clear()
+                else:
+                    # Preserve borrowed manager buckets not tied to pages this
+                    # runtime allocated. Replaying our retired buckets would
+                    # otherwise write to pages that may now serve a new request.
+                    for key, bucket in self._owned_graph_buckets.items():
+                        if manager.buckets.get(key) is bucket:
+                            self._retire_graph_bucket(bucket)
+                            if key in self._replaced_graph_buckets:
+                                manager.buckets[key] = self._replaced_graph_buckets[key]
+                            else:
+                                del manager.buckets[key]
+            self._owned_graph_buckets.clear()
+            self._replaced_graph_buckets.clear()
+            self.graph_manager = None
+            if self._graph_padding_owner is not None:
+                self.scheduler.block_manager.release(self._graph_padding_owner)
+                self._graph_padding_owner = None
+            self.graph_padding_block_ids = None
+            if self.scheduler.prepare_request == self.admit_prefix:
+                self.scheduler.prepare_request = self._previous_prepare_request
+            if self.scheduler.evict_cache == self.prefix_cache.evict_until_free:
+                self.scheduler.evict_cache = self._previous_evict_cache
+            self._closed = True
+        finally:
+            self._closing = False
+
+    @staticmethod
+    def _retire_graph_bucket(bucket) -> None:
+        # A caller may still hold a bucket reference for diagnostics. Prevent
+        # that stale reference from replaying writes after its pages are freed.
+        for name in ("graph", "logits", "sampled_token_ids"):
+            if hasattr(bucket, name):
+                setattr(bucket, name, None)
 
     def prepare_waiting(self) -> None:
+        self._ensure_open()
         for request in list(self.scheduler.waiting):
             limit = getattr(getattr(self.model, "config", None), "max_position_embeddings", None)
             if limit is not None and request.max_cache_tokens > limit:
@@ -57,6 +139,7 @@ class NativeBatchRuntime:
             self.admit_prefix(request)
 
     def admit_prefix(self, request: GenerationRequest) -> int:
+        self._ensure_open()
         request.prefix_cache_key = None
         request.prefix_block_ids = []
         request.prefix_len = 0
@@ -83,8 +166,33 @@ class NativeBatchRuntime:
         return torch.cat([sample_next_token(logits[row:row + 1], *params[row], backend=self.sampling_backend)
                           for row in range(len(requests))])
 
+    def _get_graph_bucket(self, batch_size, max_blocks, padding):
+        self._ensure_open()
+        manager = self.graph_manager
+        if self._owns_graph_manager or self._graph_padding_owner is None:
+            return manager.get(batch_size, max_blocks, padding_block_ids=padding)
+        key = manager.shape_for(batch_size, max_blocks)
+        previous = manager.buckets.get(key)
+        replace = previous is not None and previous.padding_block_ids is None
+        if replace:
+            # Do not attach runtime-owned pages or a new capture to a caller's
+            # preexisting uninitialized bucket. Restore it when we close.
+            del manager.buckets[key]
+        try:
+            bucket = manager.get(batch_size, max_blocks, padding_block_ids=padding)
+        except BaseException:
+            if replace:
+                manager.buckets[key] = previous
+            raise
+        if previous is None or replace:
+            self._owned_graph_buckets[key] = bucket
+            if replace:
+                self._replaced_graph_buckets[key] = previous
+        return bucket
+
     @torch.inference_mode()
     def decode_step(self, requests: list[GenerationRequest]) -> dict[str, int]:
+        self._ensure_open()
         if not requests:
             return {}
         device = self.cache.device
@@ -103,9 +211,7 @@ class NativeBatchRuntime:
             padding = self.graph_padding_block_ids
             if padding is None:
                 raise RuntimeError("graph replay requires reserved graph_padding_block_ids")
-            bucket = self.graph_manager.get(
-                len(requests), width, padding_block_ids=padding
-            )
+            bucket = self._get_graph_bucket(len(requests), width, padding)
             if not bucket.captured:
                 bucket.capture()
             greedy_in_graph = bucket.capture_sampling and all(request.temperature == 0 for request in requests)
@@ -123,6 +229,7 @@ class NativeBatchRuntime:
     @torch.inference_mode()
     def prefill_step(self, requests: list[GenerationRequest]) -> dict[str, int]:
         """Execute reserved prompt ranges; emit only after the final chunk."""
+        self._ensure_open()
         result: dict[str, int] = {}
         for request in requests:
             try:
@@ -153,6 +260,7 @@ class NativeBatchRuntime:
 
     def step(self) -> dict[str, int]:
         """Execute decode first; then spend remaining token budget on prefill."""
+        self._ensure_open()
         self.prepare_waiting()
         output = self.scheduler.schedule()
         active = [request for request in output.decode if not request.is_finished]

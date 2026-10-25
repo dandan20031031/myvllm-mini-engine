@@ -6,16 +6,7 @@ import time
 import torch
 
 from ..sampling import sample_next_token
-
-
-@dataclass
-class IncrementalGenerationResult:
-    text: str
-    token_ids: list[int]
-    finish_reason: str
-    ttft_ms: float
-    tpot_ms: float
-    total_latency_ms: float
+from .outputs import IncrementalGenerationResult
 
 
 @dataclass

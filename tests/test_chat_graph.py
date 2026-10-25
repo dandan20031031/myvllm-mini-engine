@@ -54,7 +54,8 @@ def test_cli_cuda_graph_routes_each_chat_turn_and_clear_keeps_history_correct(mo
     calls = install_cli_runner(monkeypatch)
     commands = iter(("first", "second", "/clear", "new conversation", "/exit"))
     monkeypatch.setattr("builtins.input", lambda prompt: next(commands))
-    monkeypatch.setattr("sys.argv", ["mini_engine", "--chat", "--cuda-graph", "--max-new-tokens", "4"])
+    monkeypatch.setattr("sys.argv", ["mini_engine", "--chat", "--cuda-graph", "--max-new-tokens", "4",
+                                    "--decode-backend", "cuda", "--data-backend", "cuda"])
     main()
     assert len(calls["load"]) == 1
     assert [len(messages) for messages, _, _ in calls["chat"]] == [1, 3, 1]
@@ -74,7 +75,8 @@ def test_cli_default_chat_remains_eager(monkeypatch):
 
 def test_cli_single_prompt_forwards_cuda_graph_flag(monkeypatch, capsys):
     calls = install_cli_runner(monkeypatch)
-    monkeypatch.setattr("sys.argv", ["mini_engine", "--prompt", "hello", "--cuda-graph", "--max-new-tokens", "4"])
+    monkeypatch.setattr("sys.argv", ["mini_engine", "--prompt", "hello", "--cuda-graph", "--max-new-tokens", "4",
+                                    "--decode-backend", "cuda", "--data-backend", "cuda"])
     main()
     assert calls["generate"] == [("hello", 4, {"use_cuda_graph": True})]
     assert '"text": "answer"' in capsys.readouterr().out
@@ -199,9 +201,7 @@ def test_batch_graph_metadata_and_sampling_match_eager_when_active_slots_shrink(
             outputs.append([request.output_token_ids for request in requests])
             assert runner.block_manager.used_blocks == (4 if graph else 0)
         finally:
-            for request in requests:
-                runtime.scheduler.abort(request.request_id)
-            runner._sync()
-            runner.block_manager.release("__graph_padding__")
+            runtime.close()
             runner.close()
+        assert runner.block_manager.used_blocks == 0
     assert outputs[0] == outputs[1]

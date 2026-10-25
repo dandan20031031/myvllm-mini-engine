@@ -127,79 +127,88 @@ def run_mode(args, use_cuda_graph: bool):
         ),
         quant_backend=args.quant_backend,
     )
-    backend_report_start = (
-        runner.model.backend_report() if hasattr(runner.model, "backend_report") else None
-    )
-    runtime = runner.create_batch_runtime(
-        use_cuda_graph=use_cuda_graph,
-        graph_batch_sizes=(1, 2, 4, 8, 16),
-        graph_block_buckets=(8, 16, 32, 64),
-    )
-    runtime.enable_prefix_cache = args.prefix_cache == "enabled"
-    if args.ignore_eos:
-        runtime.eos_token_ids.clear()
-    prompt_ids = encode_prompts(runner, args.prompts)
-    for _ in range(args.warmup):
-        run_once(runtime, prompt_ids, args.max_new_tokens, args.device)
-    if torch.cuda.is_available() and str(args.device).startswith("cuda"):
-        torch.cuda.reset_peak_memory_stats(torch.device(args.device))
-    samples = [run_once(runtime, prompt_ids, args.max_new_tokens, args.device) for _ in range(args.repetitions)]
-    backend_report_end = (
-        runner.model.backend_report() if hasattr(runner.model, "backend_report") else None
-    )
-    payload = {
-        "mode": "cuda_graph" if use_cuda_graph else "eager",
-        "model": args.model,
-        "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
-        "pytorch": torch.__version__,
-        "cuda_runtime": torch.version.cuda,
-        "dandan_ops": dandan_metadata(),
-        "dtype": args.dtype,
-        "batch_size": len(args.prompts),
-        "max_new_tokens": args.max_new_tokens,
-        "ignore_eos": args.ignore_eos,
-        "prefix_cache": args.prefix_cache,
-        "prompts": args.prompts,
-        "prompt_tokens": [len(ids) for ids in prompt_ids],
-        "prompt_token_digest": token_digest(prompt_ids),
-        "block_size": args.block_size,
-        "backends": {
-            "prefill": args.prefill_backend,
-            "decode": args.decode_backend,
-            "elementwise": args.elementwise_backend,
-            "data": args.data_backend,
-            "linear": args.linear_backend,
-        },
-        "projection_fusion": args.fuse_projections,
-        "quantization": args.quantization,
-        "quant_backend": args.quant_backend,
-        "quant_group_size": args.quant_group_size if args.quantization != "none" else None,
-        "quantization_report": runner.model.quantization_report,
-        "backend_report": backend_report_end,
-        "library_fingerprint_start": (backend_report_start or {}).get("dandan_ops"),
-        "library_fingerprint_end": (backend_report_end or {}).get("dandan_ops"),
-        "library_files_unchanged_during_run": (
-            (backend_report_start or {}).get("dandan_ops")
-            == (backend_report_end or {}).get("dandan_ops")
-        ),
-        "warmup": args.warmup,
-        "repetitions": args.repetitions,
-        "samples": samples,
-        "median_total_ms": statistics.median(row["total_ms"] for row in samples),
-        "median_tokens_per_second": statistics.median(row["tokens_per_second"] for row in samples),
-        "median_output_tokens": statistics.median(row["output_tokens"] for row in samples),
-        "p95_total_ms": percentile([row["total_ms"] for row in samples], 0.95),
-        "repeat_output_token_match": len({row["output_token_digest"] for row in samples}) == 1,
-        "peak_memory_mb": (
-            torch.cuda.max_memory_allocated(torch.device(args.device)) / (1024 * 1024)
-            if torch.cuda.is_available() and str(args.device).startswith("cuda") else None
-        ),
-    }
-    del runtime, runner
-    gc.collect()
-    if torch.cuda.is_available() and str(args.device).startswith("cuda"):
-        torch.cuda.empty_cache()
-    return payload
+    runtime = None
+    try:
+        backend_report_start = (
+            runner.model.backend_report() if hasattr(runner.model, "backend_report") else None
+        )
+        runtime = runner.create_batch_runtime(
+            use_cuda_graph=use_cuda_graph,
+            graph_batch_sizes=(1, 2, 4, 8, 16),
+            graph_block_buckets=(8, 16, 32, 64),
+        )
+        runtime.enable_prefix_cache = args.prefix_cache == "enabled"
+        if args.ignore_eos:
+            runtime.eos_token_ids.clear()
+        prompt_ids = encode_prompts(runner, args.prompts)
+        for _ in range(args.warmup):
+            run_once(runtime, prompt_ids, args.max_new_tokens, args.device)
+        if torch.cuda.is_available() and str(args.device).startswith("cuda"):
+            torch.cuda.reset_peak_memory_stats(torch.device(args.device))
+        samples = [run_once(runtime, prompt_ids, args.max_new_tokens, args.device) for _ in range(args.repetitions)]
+        backend_report_end = (
+            runner.model.backend_report() if hasattr(runner.model, "backend_report") else None
+        )
+        payload = {
+            "mode": "cuda_graph" if use_cuda_graph else "eager",
+            "model": args.model,
+            "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+            "pytorch": torch.__version__,
+            "cuda_runtime": torch.version.cuda,
+            "dandan_ops": dandan_metadata(),
+            "dtype": args.dtype,
+            "batch_size": len(args.prompts),
+            "max_new_tokens": args.max_new_tokens,
+            "ignore_eos": args.ignore_eos,
+            "prefix_cache": args.prefix_cache,
+            "prompts": args.prompts,
+            "prompt_tokens": [len(ids) for ids in prompt_ids],
+            "prompt_token_digest": token_digest(prompt_ids),
+            "block_size": args.block_size,
+            "backends": {
+                "prefill": args.prefill_backend,
+                "decode": args.decode_backend,
+                "elementwise": args.elementwise_backend,
+                "data": args.data_backend,
+                "linear": args.linear_backend,
+            },
+            "projection_fusion": args.fuse_projections,
+            "quantization": args.quantization,
+            "quant_backend": args.quant_backend,
+            "quant_group_size": args.quant_group_size if args.quantization != "none" else None,
+            "quantization_report": runner.model.quantization_report,
+            "backend_report": backend_report_end,
+            "library_fingerprint_start": (backend_report_start or {}).get("dandan_ops"),
+            "library_fingerprint_end": (backend_report_end or {}).get("dandan_ops"),
+            "library_files_unchanged_during_run": (
+                (backend_report_start or {}).get("dandan_ops")
+                == (backend_report_end or {}).get("dandan_ops")
+            ),
+            "warmup": args.warmup,
+            "repetitions": args.repetitions,
+            "samples": samples,
+            "median_total_ms": statistics.median(row["total_ms"] for row in samples),
+            "median_tokens_per_second": statistics.median(row["tokens_per_second"] for row in samples),
+            "median_output_tokens": statistics.median(row["output_tokens"] for row in samples),
+            "p95_total_ms": percentile([row["total_ms"] for row in samples], 0.95),
+            "repeat_output_token_match": len({row["output_token_digest"] for row in samples}) == 1,
+            "peak_memory_mb": (
+                torch.cuda.max_memory_allocated(torch.device(args.device)) / (1024 * 1024)
+                if torch.cuda.is_available() and str(args.device).startswith("cuda") else None
+            ),
+        }
+        return payload
+    finally:
+        try:
+            if runtime is not None:
+                runtime.close()
+        finally:
+            runner.close()
+            del runtime, runner
+            gc.collect()
+            if torch.cuda.is_available() and str(args.device).startswith("cuda"):
+                torch.cuda.empty_cache()
+
 
 
 def main():

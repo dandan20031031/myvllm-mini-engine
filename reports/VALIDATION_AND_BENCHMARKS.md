@@ -1,6 +1,31 @@
 # 系统验证与性能评测
 
-汇总截至2026-10-24已记录的验收与实验。本次文档整理未重新跑模型、测试或benchmark。实现约束见 [推理引擎架构与实现](ARCHITECTURE.md)，全部数据索引见 [技术报告目录](README.md)。
+汇总既有验收与实验，并增加2026-10-25结构维护后的回归和真实模型验收。历史性能数据保留原版本及计时范围，本轮未重新测量性能。实现约束见 [推理引擎架构与实现](ARCHITECTURE.md)，全部数据索引见 [技术报告目录](README.md)。
+
+## 2026-10-25结构维护验收
+
+统一启动配置、服务分层、公共结果类型和runtime关闭接口后，全量 **403 passed、2 warnings**；设置`MINI_ENGINE_TEST_CUDA=1`，CUDA与Graph实际执行，没有跳过项。warning仍为Toolkit13.3与PyTorch CUDA12.8差异、setuptools私有MSVC接口。JUnit为`build/validation/structure_pytest.xml`。
+
+新增回归覆盖CLI/HTTP参数一致性、加载前拒绝非法组合、服务构造/start/bind失败、join失败时保护runner、关闭幂等、创建失败回滚、借用Graph与外部padding保护、退休Graph禁止继续replay、真实CUDA页重用，以及benchmark/profiler异常后的资源归还与插桩恢复。安装包成功构建，确认新serving模块、共享配置/结果模块和CUDA源码均包含在wheel中。
+
+完整Qwen3-0.6B BF16重新执行64-token prompt、8-token固定输出的系统验收：
+
+| 检查 | 本轮结果 |
+|---|---|
+| 完整/16-token chunk prefill | 输出逐token一致 |
+| Prefix冷/热/部分命中 | 实际计算64 / 0 / 5 tokens，共享KV不变 |
+| batch2/4 eager与Graph | 真实capture，输出逐token一致，close后引用归零 |
+| 两条并发HTTP请求 | JSON与SSE均返回8-token usage，SSE正常结束，服务关闭后页引用归零 |
+| 原生命令行 | BF16 CUDA Graph加载及生成正常，以EOS结束 |
+
+系统原始结果为`build/validation/structure_system_validation.json`，可提交证据见[结构维护摘要](structure_validation_summary.json)。本轮完整模型仅重测BF16；下方FP16/W4A16完整模型记录来自原有验收，不冒充本轮质量验证。以上均为正确性和生命周期验收，不计算吞吐、TPOT或加速比。
+
+```powershell
+. .\scripts\enter_project.ps1
+$env:MINI_ENGINE_TEST_CUDA = "1"
+.\.venv\Scripts\python -m pytest -q -o cache_dir=build/pytest_cache --junitxml=build/validation/structure_pytest.xml
+.\.venv\Scripts\python benchmarks\validate_system_extensions.py --model models/Qwen3-0.6B --dtype bf16 --http-smoke --output build/validation/structure_system_validation.json
+```
 
 ## 已执行的正确性验收
 

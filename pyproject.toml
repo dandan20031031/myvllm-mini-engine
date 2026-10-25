@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "miniqwen-engine"
 version = "0.1.0"
-description = "A small Qwen3-0.6B inference engine with paged KV cache foundations"
+description = "A Windows-native Qwen3 inference engine with paged KV, CUDA graphs and HTTP serving"
 license = {file = "LICENSE"}
 readme = "README.md"
 requires-python = ">=3.10"

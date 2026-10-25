@@ -1,4 +1,5 @@
-from .qwen3 import IncrementalGenerationResult, Qwen3ModelRunner
+from .outputs import IncrementalGenerationResult
+from .qwen3 import Qwen3ModelRunner
 from .native_qwen3 import NativeQwen3, Qwen3Config
 from .native_runner import NativeQwen3Runner
 

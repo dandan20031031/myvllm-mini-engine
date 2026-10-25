@@ -2,6 +2,22 @@
 
 本文件是当前开发约定；路线变化同步更新。技术报告按主题合并至 [技术报告目录](reports/README.md)，阶段编号用于关联历史交付和实验文件。
 
+## 2026-10-25：先完成现有项目的结构维护
+
+本轮优先整理已可运行的Qwen3-0.6B引擎。Qwen3.5等新架构、混合注意力/多模态和脱离Transformers的独立权重加载器暂缓，继续使用Transformers加载权重、tokenizer和正确性参考。
+
+| 工作 | 当前落地与验收边界 |
+|---|---|
+| 统一启动配置 | `RunnerConfig`负责模型/后端/精度的静态组合约束，`cli.py`共享参数注册与转换；Chat、HTTP保留各自的请求/服务参数，硬件和算子能力由runner检查 |
+| 分离服务职责 | `serving/protocol.py`校验请求与定义错误，`service.py`管理worker和队列，`http.py`负责连接及JSON/SSE；`server.py`保留兼容导入和原启动命令 |
+| 提取公共结果 | `model/outputs.py`统一native/reference的`IncrementalGenerationResult`，不借此更换模型执行循环 |
+| 集中资源清理 | batch会话提供`close()`，明确请求页、Prefix、Graph/scratch的自有与借用关系；CLI、worker与服务入口通过`finally`依次退出 |
+| 验收与报告 | 已完成两个入口参数、旧导入兼容性、启动失败/关闭/重复关闭、借用Graph资源回归；全量403 passed、2 warnings，真实BF16模型chunk/prefix/batch2/4 Graph/HTTP-SSE通过，见主题报告与紧凑摘要 |
+
+该调整以职责边界和可维护性为验收目标，不声称增加吞吐或减少延迟。保持已有命令、历史实验数据和阶段记录；不新增一套重复的阶段报告。以下历史阶段状态与性能证据保留原实验范围。
+
+本轮结构维护已验收，benchmark、profiling与系统验证脚本统一调用`runtime.close()`；每轮性能测量间的Prefix清空仍保留在原计时边界外。后续先深化执行批次接口和同条件MiniVLLM对照，再按profiling结果选择ragged/paged prefill或低精度KV；暂不扩大模型架构范围。
+
 ## 2026-10-23：面向实习作品的执行计划（优先于下方历史顺序）
 
 目标是能解释、复现和部署的单卡推理系统。项目不追求复制完整 vLLM/SGLang，也不把尚未测量的优化写成加速结果。保留旧阶段编号及未完成项，下面是本轮实施顺序；每阶段提交代码、测试，并更新对应主题的调用链与验收记录。
@@ -43,7 +59,7 @@ DeepInfer保留为异步调度、确定性与投机机制的阅读参考，不�
 | 28 | 真实引擎PyTorch Profiler/NVTX入口、CPU与GPU热点、Graph对照 | PyTorch eager/Graph采集与2项恢复/异常测试通过；Nsight已安装，但本执行环境CLI未生成report，硬件counter待采集 |
 | 29 | CLI Chat完整decode Graph、固定pinned/GPU metadata、图内greedy、同runner交替配对TTFT/TPOT/P50/P95 | 功能完成；FP16/BF16跨页/多轮/异常回收与batch缩容对拍，全量356 tests通过；真实模型结果见主题验收报告 |
 
-阶段29后优先级：先完成vLLM/SGLang架构与源码对照，明确本项目应复用的接口边界；性能只推进batch=1/2/4/8/16、短/长prompt的同条件MiniVLLM对照及本项目服务稳定性，再选择直接paged多query/ragged prefill或低精度KV中的一条深化。PD分离、多GPU与训练型draft继续后置；单卡0.6B先用profiling证明收益再扩大架构。
+阶段29后优先级：vLLM/SGLang架构与源码对照已并入主题报告，先按上方2026-10-25计划整理接口与资源生命周期并完成回归；性能只推进batch=1/2/4/8/16、短/长prompt的同条件MiniVLLM对照及本项目服务稳定性，再选择直接paged多query/ragged prefill或低精度KV中的一条深化。PD分离、多GPU与训练型draft继续后置；单卡0.6B先用profiling证明收益再扩大架构。
 
 本轮完成可独立验收的23–27。旧计划的FP8 GEMM、INT8/FP8 KV、NVFP4/MXFP8、训练型draft仍是后续研究工作，不因本轮结束自动标记完成。它们分别需要独立kernel、模型质量验收以及Windows硬件/工具链证据；保留在阶段16/17/21中继续推进，不提供伪实现。已有W4A16不重复开发。
 
@@ -70,18 +86,21 @@ DeepInfer保留为异步调度、确定性与投机机制的阅读参考，不�
 ## 2. 架构与数据流
 
 ~~~text
-CLI / future HTTP
-        |
-LLMEngine -- Scheduler -- Request
-        |          |
-        |       BlockManager
-        |
-NativeQwen3Runner -- NativeQwen3 -- QuantBackend / ReferenceQuantLinear
-        |                    |
-    KVCachePool          CUDA kernels / PyTorch reference
+启动共享: cli.add_runner_arguments -> RunnerConfig -> NativeQwen3Runner.from_pretrained
+
+CLI/Chat: __main__ -> runner.generate_incremental -> NativeQwen3 / Chat Graph
+HTTP: serving.http -> InferenceService worker -> NativeBatchRuntime.step
+                                                  |              |
+                                              Scheduler     NativeQwen3
+                                                  |              |
+                                          BlockManager / KVCachePool / PrefixCache
+
+共同后端: CUDA kernels / PyTorch-cuBLAS / optional dandan_ops / quantization
 ~~~
 
-单请求NativeQwen3Runner持有BlockManager和KVCachePool；create_batch_runtime接到Scheduler、NativeBatchRuntime和DecodeGraphManager。Prefill按请求分块并优先让decode推进；完整prefix可直接复用logits。HTTP线程通过单GPU worker提交请求。
+两条路径共享模型、缓存实现与算子，生成循环仍各自独立。早期`LLMEngine`保留为facade/reference接口，不是原生Chat或HTTP的必经入口。`server.py`只保留服务命令行启动与兼容导出；服务协议、worker、传输分别归`serving`的三个模块。
+
+NativeQwen3Runner持有模型、BlockManager和KVCachePool；`create_batch_runtime()`创建使用它们的可关闭batch会话。Prefill按请求分块并优先让decode推进；完整prefix可直接复用logits。runtime.close归还会话请求页、Prefix引用和自有Graph资源，外部提供的manager/padding页遵守借用边界；调用方应先停止worker并关闭runtime，再关闭或复用runner。CLI的finally关闭runner持有的Chat Graph与scratch。
 
 KV 布局是 [layer, physical_block, token_in_block, kv_head, head_dim]。KV 精度当前与浮点模型一致；低精度权重不代表低精度 KV。
 

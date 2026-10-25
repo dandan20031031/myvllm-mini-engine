@@ -4,7 +4,7 @@ from .runtime import configure_local_cache
 
 configure_local_cache()  # Before importing torch/model code or initializing CUDA.
 
-from .config import EngineConfig, QuantConfig
+from .config import EngineConfig, QuantConfig, RunnerConfig
 from .engine.llm_engine import LLMEngine
 
-__all__ = ["EngineConfig", "QuantConfig", "LLMEngine"]
+__all__ = ["EngineConfig", "QuantConfig", "RunnerConfig", "LLMEngine"]
