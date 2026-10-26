@@ -14,7 +14,7 @@
 
 客户端usage缺失时，不以SSE chunk数代替token数。性能主对照为Nano-vLLM和MiniVLLM，vLLM/SGLang只作架构参考。本仓库尚无三个小型引擎的同条件实测排名。
 
-`mini_engine.benchmarks.runner`提供通用callable计时和JSON输出，适合固定工作量的局部实验；它不会自动校验实际生成token数或模型语义。完整跨引擎对照还需共同离线adapter，不能直接把配置中的`output_tokens`当实测输出。
+benchmark工具统一放在本目录，推理包只包含运行代码。完整跨引擎对照还需共同离线adapter，不能直接把配置中的`output_tokens`当实测输出。
 
 ## Ragged Prefill内部消融
 
@@ -31,7 +31,7 @@
 
 计时包括公开forward校验、选择行索引校验/设备索引tensor创建、输出copy及完成同步；排除模型加载、tokenizer、PrefillBatch构造、host行选择规划、对拍、warmup、指纹采集与清理。CUDA Events记录dispatch时间线，包含launch间隙，不是纯kernel指令延迟。这里报告prefill输入token/s、forward wall time与显存峰值，**不测TTFT、decode、scheduler、sampling、生成TPS或HTTP**。实际服务收益另用`benchmark_native_batch.py`/HTTP工具验收。
 
-CUDA模式直接读paged KV；显式`auto/math/dandan`模式仍逐请求dense attention，仅投影/MLP等合批，不报告为varlen Flash。显存分配峰值包含模型、KV池与输出buffer，额外allocated峰值相对调用前基线；reserved受allocator缓存及此前模式影响，不是隔离进程占用。结果范围和实际观察见[验证报告](../reports/VALIDATION_AND_BENCHMARKS.md)及[ragged摘要](../reports/ragged_prefill_summary.json)，不从功能覆盖预设加速比。
+CUDA模式直接读paged KV；显式`auto/math/dandan`模式仍逐请求dense attention，仅投影/MLP等合批，不报告为varlen Flash。显存分配峰值包含模型、KV池与输出buffer，额外allocated峰值相对调用前基线；reserved受allocator缓存及此前模式影响，不是隔离进程占用。结果范围和实际观察见[验证报告](../reports/VALIDATION_AND_BENCHMARKS.md)及[ragged摘要](../reports/data/ragged_prefill_summary.json)，不从功能覆盖预设加速比。
 
 本机FP16 B2长度32/24在严格KV逐元素阈值下失败，脚本会保留诊断并在计时前停止。B1的严格验收可用`--batch-sizes 1`；显式`--skip-kv-check`仅记录探索性原始时间，标记`validation_incomplete`且禁止倍率。用`diagnose_ragged_prefill.py`复现逐层/head误差、8-token独立greedy与同舍入权重FP32对照。短输出一致不证明batch invariance，不应只为跑完矩阵而放宽阈值。
 
@@ -53,20 +53,6 @@ CUDA模式直接读paged KV；显式`auto/math/dandan`模式仍逐请求dense at
 . .\scripts\enter_project.ps1
 .\.venv\Scripts\python benchmarks\benchmark_native_batch.py --help
 .\.venv\Scripts\python benchmarks\benchmark_chat_graph.py --help
-```
-
-示例：
-
-```python
-import torch
-from mini_engine.benchmarks import BenchmarkConfig, benchmark_callable, save_results
-
-result = benchmark_callable(
-    lambda: torch.mm(torch.randn(512, 512, device="cuda"), torch.randn(512, 512, device="cuda")),
-    BenchmarkConfig(name="example", repetitions=5, output_tokens=1),
-    device="cuda",
-)
-save_results([result], "benchmarks/results/example.json")
 ```
 
 端到端 benchmark 应固定模型版本、GPU、dtype、采样参数、prompt 数据和 `max_new_tokens`，并分别报告 TTFT、TPOT、吞吐量、显存峰值以及 P50/P95 延迟。

@@ -1,6 +1,6 @@
 # 推理引擎架构与实现
 
-更新至2026-10-25，整合原阶段00–29、结构维护及ragged/paged prefill的实现说明。范围为Windows 11单GPU、Qwen3-0.6B；HuggingFace负责权重加载、tokenizer和正确性参考，native forward、缓存、调度与CUDA扩展由项目实现。运行命令见 [项目 README](../README.md)，证据见 [系统验证与性能评测](VALIDATION_AND_BENCHMARKS.md)。
+更新至2026-10-26。范围为Windows 11单GPU、Qwen3-0.6B；HuggingFace负责权重加载、tokenizer和正确性参考，native forward、缓存、调度与CUDA扩展由项目实现。运行命令见[README](../README.md)，当前路线见[开发方案](../DEVELOPMENT_PLAN.md)，数值与性能证据见[验证报告](VALIDATION_AND_BENCHMARKS.md)。
 
 ## 调用链与代码入口
 
@@ -20,7 +20,7 @@ HTTP -> serving.http -> InferenceService.submit -> 单GPU worker._run
 共同后端: CUDA kernels / cuBLAS / optional dandan_ops
 ```
 
-两条生成路径共享模型、KV与算子实现，但CLI/Chat直接执行单请求循环，HTTP/batch经调度runtime执行；不能把示意图理解为所有入口已收敛到同一个执行循环。`engine/llm_engine.py`保留早期facade/reference接口，并非当前原生Chat和服务的必经热路径。
+两条生成路径共享模型、KV与算子实现，但CLI/Chat直接执行单请求循环，HTTP/batch经调度runtime执行；不能把示意图理解为所有入口已收敛到同一个执行循环。Python调用以`NativeQwen3Runner`和它创建的batch runtime为执行入口。
 
 | 入口 | 职责 |
 |---|---|
@@ -39,13 +39,17 @@ HTTP -> serving.http -> InferenceService.submit -> 单GPU worker._run
 | `mini_engine/serving/service.py` | 请求队列、单GPU worker、tokenizer、runtime、取消与退出 |
 | `mini_engine/serving/http.py` | HTTP连接限流、路由、JSON/SSE编码与断线检测 |
 
-### 2026-10-25结构维护记录
+### 启动与接口边界
 
 启动参数由`add_runner_arguments()`统一注册，经`runner_config_from_args()`生成不可变`RunnerConfig`，再由`runner_kwargs()`转换为既有`from_pretrained()`参数。配置仅校验静态组合；CUDA设备、算子库版本及模型head_dim等能力检查继续在runner/backend执行。CLI与HTTP保留各自的生成上限、队列及超时参数，服务只暴露其支持的参数子集，不能把共享注册理解为两个入口支持全部相同模式。
 
 `IncrementalGenerationResult`提取到`model/outputs.py`，native/reference共同引用；没有替换Transformers权重加载流程。服务拆分保持`python -m mini_engine.server`和`from mini_engine.server import APIError, ChatHTTPServer, InferenceService`可用。CLI仍直接运行单请求生成，HTTP worker仍使用batch runtime。
 
-本轮关注模块职责和资源回收，未新增性能结论。全量403项测试及真实BF16模型chunk/prefix/batch2/4 Graph/HTTP-SSE验收通过，详见[结构维护验收](VALIDATION_AND_BENCHMARKS.md)及[紧凑摘要](structure_validation_summary.json)；下文历史性能数据仍属于原测量版本。Qwen3.5、混合注意力/多模态和独立权重加载器暂缓。
+结构维护的原始验收保留在[摘要](data/structure_validation_summary.json)，最新状态集中到[验证报告](VALIDATION_AND_BENCHMARKS.md)，不在模块说明中重复累计测试数。Qwen3.5、混合注意力/多模态和独立权重加载器暂缓。
+
+2026-10-26整理移除未进入真实Chat/HTTP路径的早期`LLMEngine`/`EngineConfig`门面，不保留同名空壳。原Python调用方改用`from mini_engine.model import NativeQwen3Runner`，由`from_pretrained()`加载，单请求使用`generate_incremental()`，调度执行使用`create_batch_runtime()`；按下文资源边界关闭会话。CLI和HTTP启动入口保持不变，底层`Scheduler`、cache与原生模型仍可直接用于测试/实验。
+
+文档入口收敛为README、开发路线与主题报告，重复项目总览、阶段Markdown和一次性迁移快照退出活动目录。整理前的工作区原字节备份于忽略的`build/archive/structure_cleanup_20261026`；Git仍保留历史实现与实验来源。主题报告和支持既有结论的JSON保留原有证据范围，不因文件减少而重算或升级性能结论。
 
 ## KV所有权、Prefix与调度
 
@@ -97,7 +101,7 @@ Scheduler.prefill ranges -> NativeBatchRuntime.prefill_step
 
 `forward_prefill_batch(batch, cache, logits_rows=...)`通过Module调用进入公开forward，保留模型hook；B1保留原单请求hook/position语义。旧`forward(input_ids, cache, block_ids, position=...)`默认完整logits不变，reference和投机验证继续使用；不具备新batch接口的外部reference runner仍走兼容执行协议。packed阶段发生无法归因的异常时中止本轮相关chunks并释放请求引用；已共享的prefix页只读。
 
-正确性、资源归还与三路径forward消融见[验证报告](VALIDATION_AND_BENCHMARKS.md)和[ragged摘要](ragged_prefill_summary.json)。消融分别固定B1完整logits、B1末行logits、packed末行logits；仅测预建metadata后的forward，不等同于TTFT、生成TPS或HTTP吞吐。Graph仍只覆盖decode，本轮未把ragged prefill捕获进图。
+正确性、资源归还与三路径forward消融见[验证报告](VALIDATION_AND_BENCHMARKS.md)和[ragged摘要](data/ragged_prefill_summary.json)。消融分别固定B1完整logits、B1末行logits、packed末行logits；仅测预建metadata后的forward，不等同于TTFT、生成TPS或HTTP吞吐。Graph仍只覆盖decode，本轮未把ragged prefill捕获进图。FP16合批的严格逐元素KV阈值仍未通过，多请求时间仅作探索，不发布正式倍率；短输出一致不能证明batch invariance，选择性LM head也未观察到稳定延迟收益。
 
 ## CUDA Graph与投影融合
 
@@ -224,12 +228,11 @@ vLLM V1把请求处理、EngineCore调度、Executor/Worker和ModelRunner分层�
 
 一个值得解释的具体差异：在所读vLLM默认APC分支中，`get_computed_blocks()`将可命中长度限制在末token之前，以重新计算输出logits；我们给完整block边界缓存`next_logits`，在精确边界命中时可直接采样。它有额外logits存储成本，只适用于当前单模型/固定权重与对应缓存语义，不能据此宣称优于所有APC方案。[vLLM对应分支](https://github.com/vllm-project/vllm/blob/5f63ea461ccd567ece6f50dd3701430c0f321039/vllm/v1/core/kv_cache_manager.py#L264)
 
-### 从源码对照得到的开发取舍
+### 当前改进重点
 
-1. **先清晰执行接口**：Chat与batch可继续有不同入口，但逐步共享输入准备、模型执行、采样及清理边界，减少两套循环的行为漂移。把调度决策与GPU执行metadata分开，不为此引入多进程Executor。
-2. **继续完善ragged执行边界**：已将query范围、绝对位置与KV页接入packed模型及CUDA paged prefill；下一步依据计量改进attention/metadata开销。prefill与decode仍是不同执行调用，不声称已复现工业框架的所有混合批次与overlap能力。
-3. **补强后端契约**：明确dense/paged、dtype/head_dim、suffix offset、Graph eligibility和workspace约束。`dandan_ops`仍独立演进，引擎在版本升级后重新验收，Graph不得沿用旧权重/路由捕获。
-4. **按证据决定索引与异步复杂度**：Prefix扫描成为CPU热点后再选block hash或radix；CPU/GPU overlap需要in-flight批次、取消、过期结果、buffer及KV最后使用时刻的协议，不能只把`.cpu()`改成non_blocking就算完成。
-5. **继续控制范围**：保留单卡dense、Windows原生和可解释的资源所有权；多GPU、PD分离、主机层级缓存及多模态保持后置。现有continuous batching、Prefix和Graph已形成闭环，适用范围与工业框架仍有明确差异。
+1. **先补数值边界**：逐层定位FP16合批的KV误差，扩展teacher-forced和较长生成，明确预设阈值与任务质量；在此之前不发布多请求正式倍率。
+2. **再按热点优化prefill**：区分attention、投影、metadata和词表投影成本。现有CUDA已经直接paged；dense后端仍逐请求attention，不能从合批接口推导所有后端已覆盖varlen。分别做行选择、合批和kernel消融，再验收完整生成。
+3. **减少执行重复**：Chat与batch保留必要入口，逐步共享输入准备、采样与异常协议，不再新增教学门面或多进程Executor。dandan升级后重新验收dtype/布局/Graph，不沿用旧权重或路由的capture。
+4. **受控比较后再扩范围**：补Nano-vLLM/MiniVLLM共同离线计量；索引、overlap与preemption先有profile证据及取消/资源协议，再决定实现。多GPU、PD、低精度KV和训练型draft保持后置，路线详见[开发方案](../DEVELOPMENT_PLAN.md)。
 
-上述顺序是基于当前代码的工程判断，尚未实现新的执行器、Radix索引或overlap scheduler。性能验收继续做项目内部消融与Nano-vLLM、MiniVLLM同口径对照，不要求安装vLLM/SGLang；源码阅读也不引入Linux、WSL或Triton运行依赖。
+现有continuous batching、Prefix和Graph已形成单卡闭环，但尚无Radix索引或overlap scheduler。工业源码只作设计参考，不要求安装vLLM/SGLang，也不引入Linux、WSL或Triton运行依赖。

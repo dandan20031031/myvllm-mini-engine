@@ -21,3 +21,7 @@ cuda = ["ninja>=1.11"]
 
 [tool.setuptools.packages.find]
 include = ["mini_engine*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+cache_dir = "build/pytest_cache"

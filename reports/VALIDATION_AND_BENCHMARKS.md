@@ -1,6 +1,27 @@
 # 系统验证与性能评测
 
-汇总既有验收与实验，以及2026-10-25结构维护、ragged prefill的回归和真实模型验收。历史性能数据保留原版本及计时范围。实现约束见 [推理引擎架构与实现](ARCHITECTURE.md)，全部数据索引见 [技术报告目录](README.md)。
+汇总既有验收与实验，以及2026-10-26目录精简后的回归。历史性能数据保留原版本及计时范围。实现约束见 [推理引擎架构与实现](ARCHITECTURE.md)，全部数据索引见 [技术报告目录](README.md)。
+
+## 2026-10-26 结构精简验收
+
+活动目录移除21份重复阶段Markdown、重复的项目总览、一次性缓存迁移脚本和旧能力快照。移除未进入真实推理路径的`LLMEngine/EngineConfig`、无使用方的`BatchStep`与通用callable benchmark包；CLI、HTTP、native/reference模型及数值oracle继续保留。README压缩至约150行，开发路线只保留当前优先级和约定。
+
+benchmark公共统计、JSON哈希、源码指纹和GPU快照集中至`benchmarks/common.py`，不再让ragged入口导入整个Chat benchmark。实际入口与共享helper仍纳入指纹；HTTP客户端保持纯标准库，可在其他工作目录直接执行或用`python -m`运行。PagedAttention eager/reference与Graph配对sweep计时边界不同，继续分开。
+
+最终全量 **468 passed、2 warnings、无跳过项**，CUDA/Graph实际执行。相对上一轮467项，移除3条仅验证已删除包装层的测试，新增4条公共helper与独立HTTP入口测试；不减少模型、算子、KV、服务和资源生命周期回归。JUnit为`build/validation/structure_cleanup_pytest.xml`，日志为同目录`structure_cleanup_pytest.log`；warning仍是既有Toolkit版本提示和setuptools接口。
+
+完整Qwen3-0.6B BF16重新通过完整/分块prefill、冷/热/部分Prefix、batch2/4 eager/Graph及并发HTTP/SSE，关闭后页引用归零。原始记录为`build/validation/structure_cleanup_system_validation.json`。本轮没有重跑FP16/W4A16完整模型或性能实验；下方数据保留各自日期和限制，FP16严格KV阈值未通过的问题未因目录整理而解决。
+
+fresh wheel构建成功，确认包含原生模型与CUDA源码、不再包含旧facade和benchmark包；打包前隔离旧`build/lib`，避免旧构建缓存把删除模块重新带入wheel。模型、缓存、Toolkit及用户未跟踪的构建脚本保留。
+
+整理前30份文件的原始字节和SHA256清单保存在本机忽略的`build/archive/structure_cleanup_20261026/manifest.json`；9份实验证据JSON统一移至`reports/data/`，移动前后字节哈希一致。历史JSON内部原路径属于当时的记录，保留原内容。旧内容也可从整理前提交`606aec0`追溯。
+
+```powershell
+. .\scripts\enter_project.ps1
+$env:MINI_ENGINE_TEST_CUDA = '1'
+.\.venv\Scripts\python -m pytest -q --junitxml=build/validation/structure_cleanup_pytest.xml
+.\.venv\Scripts\python benchmarks\validate_system_extensions.py --model models/Qwen3-0.6B --dtype bf16 --http-smoke --output build/validation/structure_cleanup_system_validation.json
+```
 
 ## 2026-10-25 Ragged Prefill验收
 
@@ -12,7 +33,7 @@
 
 FP16 `dandan_cuda` Linear + dense dandan Flash，以及W4A16 + dense dandan Flash也重新通过完整模型chunk/Prefix/batch2/4 Graph验收，关闭后引用归零；这两组没有重跑HTTP，也不代表INT4与BF16质量相同。原始记录分别为`build/validation/ragged_system_validation_dandan_fp16.json`和`ragged_system_validation_w4a16.json`。CLI BF16、融合与Chat Graph的真实加载/生成同样通过；首次请求含冷启动，不作性能结论。
 
-新benchmark对同一模型、token与后端比较三种预建metadata的forward：逐请求完整logits、逐请求末行logits、整批末行logits。它排除调度、metadata准备、加载和分词，不测decode、生成TPS或HTTP；所有模式使用新的attention实现，不是旧源码快照对照。CUDA Event包含提交空隙，另报告同步wall time。实际结果和数值边界在本节后续记录及[紧凑摘要](ragged_prefill_summary.json)中列出。
+新benchmark对同一模型、token与后端比较三种预建metadata的forward：逐请求完整logits、逐请求末行logits、整批末行logits。它排除调度、metadata准备、加载和分词，不测decode、生成TPS或HTTP；所有模式使用新的attention实现，不是旧源码快照对照。CUDA Event包含提交空隙，另报告同步wall time。实际结果和数值边界在本节后续记录及[紧凑摘要](data/ragged_prefill_summary.json)中列出。
 
 ### FP16合批数值边界
 
@@ -76,7 +97,7 @@ RTX5080、Qwen3-0.6B FP16、CUDA prefill/数据/elementwise、cuBLAS Linear、�
 | 两条并发HTTP请求 | JSON与SSE均返回8-token usage，SSE正常结束，服务关闭后页引用归零 |
 | 原生命令行 | BF16 CUDA Graph加载及生成正常，以EOS结束 |
 
-系统原始结果为`build/validation/structure_system_validation.json`，可提交证据见[结构维护摘要](structure_validation_summary.json)。本轮完整模型仅重测BF16；下方FP16/W4A16完整模型记录来自原有验收，不冒充本轮质量验证。以上均为正确性和生命周期验收，不计算吞吐、TPOT或加速比。
+系统原始结果为`build/validation/structure_system_validation.json`，可提交证据见[结构维护摘要](data/structure_validation_summary.json)。本轮完整模型仅重测BF16；下方FP16/W4A16完整模型记录来自原有验收，不冒充本轮质量验证。以上均为正确性和生命周期验收，不计算吞吐、TPOT或加速比。
 
 ```powershell
 . .\scripts\enter_project.ps1
@@ -97,9 +118,9 @@ $env:MINI_ENGINE_TEST_CUDA = "1"
 | FP16、dandan_cuda + dandan Flash | 通过 | 本组未执行 |
 | W4A16、dandan INT4投影 + dandan Flash | 通过 | 本组未执行 |
 
-三组均使用64-token prompt、8-token输出的短序列验收：完整prefix命中后实际计算 **64→0**，5-token suffix只计算5，完整共享页不变；Graph确实capture batch2/4，与各自eager输出对拍；清理后页引用归零。量化验收比较相同量化模型的执行路径，不代表W4与BF16质量相同。数值、配置与指纹见 [stage27_system_summary.json](stage27_system_summary.json)。
+三组均使用64-token prompt、8-token输出的短序列验收：完整prefix命中后实际计算 **64→0**，5-token suffix只计算5，完整共享页不变；Graph确实capture batch2/4，与各自eager输出对拍；清理后页引用归零。量化验收比较相同量化模型的执行路径，不代表W4与BF16质量相同。数值、配置与指纹见 [stage27_system_summary.json](data/stage27_system_summary.json)。
 
-另有FP16/W4A16短序列kernel验收：2条prompt、prefill后4次decode，logits阈值 `atol=0.125, rtol=0.01`；FP16对cuBLAS，W4对同packed state的FP16-rounded权重与FP32累加oracle，teacher-forced argmax及独立greedy匹配。原FP16到INT4的最大logit变化约9.3–9.8，部分输出改变，不能宣称质量无损。见 [stage22_backend_validation_summary.json](stage22_backend_validation_summary.json)。
+另有FP16/W4A16短序列kernel验收：2条prompt、prefill后4次decode，logits阈值 `atol=0.125, rtol=0.01`；FP16对cuBLAS，W4对同packed state的FP16-rounded权重与FP32累加oracle，teacher-forced argmax及独立greedy匹配。原FP16到INT4的最大logit变化约9.3–9.8，部分输出改变，不能宣称质量无损。见 [stage22_backend_validation_summary.json](data/stage22_backend_validation_summary.json)。
 
 回归覆盖页边界/尾组、非法metadata、非默认stream、FP16/BF16、Graph replay、prefix边界logits、LRU/live引用、有限KV容量、投机拒绝回退/EOS、服务取消/慢消费者/异常释放。新的D128 kernel尚未完成compute-sanitizer memcheck/racecheck，数值与Graph对拍不能代替它们。
 
@@ -115,9 +136,9 @@ $env:MINI_ENGINE_TEST_CUDA = "1"
 | MiniVLLM本地修复版本 | RTX5080，**实际FP32**，temperature=0.6，Graph，B3/8/16；总长上限128，实际输出336/875/1732；generate墙钟包含输入/输出处理 | 延迟中位数0.569/0.671/0.916s，报告TPS为590.1/1304.6/1890.8 |
 | Nano-vLLM官方README | RTX4070 Laptop 8GB，Qwen3-0.6B，256请求，输入/输出随机100–1024；所附bench采用temperature=0.6、ignore EOS，generate总体时间 | 官方记录133966输出token、93.41s、1434.13 TPS；不是本机实测，未确认该表实际dtype |
 
-本项目数据来自[阶段29摘要](stage29_chat_graph_summary.json)。Mini来源为2026-10-22《MinivLLM Decode 优化实验报告：批规模扩展与 CUDA Graph 边界》；本地归档已迁至`MinivLLM-workspace/pagedattn-bench-report/`，同名报告也在本地benchmark提交`0ded3fd263024dfc6fa13407fb8ef4cf1da6d835`的`docs/`内。Nano来源为[固定版本README](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/README.md#benchmark)及其[bench.py](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/bench.py)。
+本项目数据来自[阶段29摘要](data/stage29_chat_graph_summary.json)。Mini来源为2026-10-22《MinivLLM Decode 优化实验报告：批规模扩展与 CUDA Graph 边界》；本地归档已迁至`MinivLLM-workspace/pagedattn-bench-report/`，同名报告也在本地benchmark提交`0ded3fd263024dfc6fa13407fb8ef4cf1da6d835`的`docs/`内。Nano来源为[固定版本README](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/README.md#benchmark)及其[bench.py](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/bench.py)。
 
-这些数值不能相除：硬件、实际精度、batch、采样、停止长度、缓存和计时范围不同。Mini历史只留下MD/HTML汇总，没有逐次JSON或精确运行源码指纹，因此不能把590.1 TPS直接归因于当前某个checkout，也不能视为统计可靠的最终基线。来源文件哈希、条件与差异见[对照审计摘要](nano_mini_comparison_summary.json)。
+这些数值不能相除：硬件、实际精度、batch、采样、停止长度、缓存和计时范围不同。Mini历史只留下MD/HTML汇总，没有逐次JSON或精确运行源码指纹，因此不能把590.1 TPS直接归因于当前某个checkout，也不能视为统计可靠的最终基线。来源文件哈希、条件与差异见[对照审计摘要](data/nano_mini_comparison_summary.json)。
 
 Mini报告还需保留以下修正：
 
@@ -162,7 +183,7 @@ FP16、Hq16/Hkv8/D128，block16，每Graph20次调用、20组样本，同输入�
 | 8/512 | 72.38 us | 41.50 us | 1.74x |
 | 32/2048 | 713.76 us | 400.30 us | 1.78x |
 
-block16/32/64/128/256共15组均通过reference对拍，比值范围1.74–1.80x，最大绝对误差≤0.0002442。外部GPU负载未受控，结果仅支持本机单算子观察，不能推导服务加速或工业引擎排名。配置、误差与指纹见 [stage26_paged_summary.json](stage26_paged_summary.json)。
+block16/32/64/128/256共15组均通过reference对拍，比值范围1.74–1.80x，最大绝对误差≤0.0002442。外部GPU负载未受控，结果仅支持本机单算子观察，不能推导服务加速或工业引擎排名。配置、误差与指纹见 [stage26_paged_summary.json](data/stage26_paged_summary.json)。
 
 ### 单请求greedy投机
 
@@ -173,7 +194,7 @@ BF16、项目CUDA、projection fusion，固定32实际输出token（ignore EOS�
 | 重复指定英文句子 | 537.39 ms | 300.87 ms | 32→16 | 80% |
 | 用一句话解释KV Cache | 422.81 ms | 415.17 ms | 32→32 | 0% |
 
-观察比值1.79x/1.02x。计时含prefill、草稿查找、验证、接受/回退，排除加载、tokenization及最终文本decode。两条路径均为单请求eager，未证明独占GPU；不代表Graph/HTTP收益、长上下文或所有浮点配置输出不变。原始样本为 `benchmarks/results/stage24_speculative_qwen3.json`，紧凑结果在 [系统摘要](stage27_system_summary.json)。
+观察比值1.79x/1.02x。计时含prefill、草稿查找、验证、接受/回退，排除加载、tokenization及最终文本decode。两条路径均为单请求eager，未证明独占GPU；不代表Graph/HTTP收益、长上下文或所有浮点配置输出不变。原始样本为 `benchmarks/results/stage24_speculative_qwen3.json`，紧凑结果在 [系统摘要](data/stage27_system_summary.json)。
 
 ### 历史batch Graph与elementwise
 
@@ -187,13 +208,13 @@ BF16、3请求、32-token输出预算、block16，计时含逐请求prefill、de
 
 这是历史runtime基线，原始文件为 `benchmarks/results/native_batch_stage19*.json`；不能与后续FP16/W4A16或只统计decode的实验拼接比较。
 
-历史elementwise Graph实验中，BF16的1×1024与128×3072形状下，RMSNorm相对Torch为5.38x/4.98x，Residual+RMSNorm为4.75x/3.85x，SiLU×Up为1.89x/1.73x；独立Residual Add为0.89x/0.95x，略慢。每Graph32调用、20次重放，另存eager wall样本，二者不可混比。完整FP16/BF16结果见 [stage07_elementwise_summary.json](stage07_elementwise_summary.json)。
+历史elementwise Graph实验中，BF16的1×1024与128×3072形状下，RMSNorm相对Torch为5.38x/4.98x，Residual+RMSNorm为4.75x/3.85x，SiLU×Up为1.89x/1.73x；独立Residual Add为0.89x/0.95x，略慢。每Graph32调用、20次重放，另存eager wall样本，二者不可混比。完整FP16/BF16结果见 [stage07_elementwise_summary.json](data/stage07_elementwise_summary.json)。
 
 ### 后端性能复核与性能分析
 
 2026-10-24的FP16后端复核中，同一cuBLAS Graph基线首末轮 **404→725 TPS**，目前不足以认定dandan FP16端到端更快。W4A16 Graph的PyTorch allocated峰值1054.64MiB，相应FP16为1614.39MiB，降低34.67%；不等于整机显存或无质量损失。64-token复核还发现一组dandan Linear eager/Graph输出digest不同，短序列验收不能覆盖所有生成长度。完整条件、输出差异与复现见 [算子后端性能复核](BACKEND_PERFORMANCE_RECHECK.md)。
 
-真实FP16 eager/Graph CPU+CUDA trace已采集；CPU launch下降，物理GPU kernel总时长接近。带插桩wall time不能作为正常推理性能。热点、命令和Nsight未成功采集的限制见 [推理引擎性能分析指南](PROFILING.md)及 [stage28_profile_summary.json](stage28_profile_summary.json)。
+真实FP16 eager/Graph CPU+CUDA trace已采集；CPU launch下降，物理GPU kernel总时长接近。带插桩wall time不能作为正常推理性能。热点、命令和Nsight未成功采集的限制见 [推理引擎性能分析指南](PROFILING.md)及 [stage28_profile_summary.json](data/stage28_profile_summary.json)。
 
 ## 计量与HTTP比较约定
 
@@ -218,7 +239,7 @@ HTTP指标保留以下定义：
 
 ## Chat完整decode Graph与单请求配对测量（2026-10-24）
 
-阶段29全量回归 **356 passed、2 warnings**，CUDA实际执行。新增覆盖FP16/BF16跨页输出、多轮bucket复用、单token/EOS不capture、容量与capture失败回收、batch活跃slot缩减，以及实际token吞吐统计。完整Qwen3-0.6B CLI已实际进行两轮Graph对话和`/clear`，正常退出。实现调用链见[架构](ARCHITECTURE.md)；原始样本在`benchmarks/results/chat_graph_stage29.json`，可提交记录见[紧凑摘要](stage29_chat_graph_summary.json)。
+阶段29全量回归 **356 passed、2 warnings**，CUDA实际执行。新增覆盖FP16/BF16跨页输出、多轮bucket复用、单token/EOS不capture、容量与capture失败回收、batch活跃slot缩减，以及实际token吞吐统计。完整Qwen3-0.6B CLI已实际进行两轮Graph对话和`/clear`，正常退出。实现调用链见[架构](ARCHITECTURE.md)；原始样本在`benchmarks/results/chat_graph_stage29.json`，可提交记录见[紧凑摘要](data/stage29_chat_graph_summary.json)。
 
 另对完整FP16模型执行3请求×16输出的真实batch eager/Graph回归，各模式2次测量，每次实际48 token，跨模式与模式内输出digest一致；仅作为batch功能检查，不纳入以下配对性能结论。
 

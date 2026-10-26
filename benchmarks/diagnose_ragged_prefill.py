@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 from contextlib import closing
 import gc
-import hashlib
 import json
 import math
 from pathlib import Path
@@ -30,6 +29,7 @@ import torch
 from mini_engine.model import NativeQwen3, NativeQwen3Runner
 from mini_engine.engine.batch import PrefillBatch
 from benchmarks import benchmark_ragged_prefill as bench
+from benchmarks.common import sha256_json, source_metadata
 
 
 def stats(actual, reference, atol, rtol):
@@ -83,12 +83,7 @@ def clean_json(value):
 
 
 def source_fingerprint():
-    result = bench.source_fingerprint()
-    files = dict(result["source_files_sha256"])
-    files[Path(__file__).relative_to(ROOT).as_posix()] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-    result["source_files_sha256"] = files
-    result["source_tree_sha256"] = bench.sha256_json(files)
-    return result
+    return source_metadata(extra_files=(__file__, bench.__file__))
 
 
 @torch.inference_mode()
@@ -206,7 +201,7 @@ def main(argv=None):
         payload["source_start"] = source_fingerprint()
         with closing(load_runner(args, True)) as fused:
             sequences = bench.prompt_tokens(fused, args.prompt_lengths, args.prompt)
-            payload["prompt_token_sha256"] = bench.sha256_json(sequences)
+            payload["prompt_token_sha256"] = sha256_json(sequences)
             payload["variants"]["low_precision_fused"], fused_data = run_variant(
                 fused, sequences, output_tokens=args.output_tokens, atol=args.atol, rtol=args.rtol)
             torch.backends.cuda.matmul.allow_tf32 = False

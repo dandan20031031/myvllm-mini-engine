@@ -132,24 +132,3 @@ class RunnerConfig:
             "quantization": self.quantization,
             "use_cuda_graph": self.use_cuda_graph,
         }
-
-
-@dataclass(frozen=True)
-class EngineConfig:
-    """Foundation facade/scheduler settings; native applications use RunnerConfig."""
-
-    model_name_or_path: str = "Qwen/Qwen3-0.6B"
-    device: str = "cuda"
-    dtype: Literal["auto", "bf16", "fp16", "fp32"] = "auto"
-    block_size: int = 16
-    num_gpu_blocks: int = 256
-    max_num_batched_tokens: int = 4096
-    max_new_tokens: int = 128
-    quantization: QuantConfig = QuantConfig()
-    enable_thinking: bool = False
-    use_custom_kernels: bool = False
-
-    def torch_dtype_name(self) -> str:
-        if self.dtype != "auto":
-            return self.dtype
-        return "bf16" if self.device.startswith("cuda") else "fp32"

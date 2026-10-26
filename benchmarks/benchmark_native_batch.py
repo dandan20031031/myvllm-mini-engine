@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import gc
-import hashlib
 import importlib.metadata
 import importlib.util
 import json
@@ -29,6 +28,7 @@ from mini_engine.engine.request import GenerationRequest
 from mini_engine.config import QuantConfig
 from mini_engine.model import NativeQwen3Runner
 from mini_engine.runtime import configure_local_cache
+from benchmarks.common import percentile, sha256_json as token_digest
 
 
 def dandan_metadata():
@@ -40,19 +40,6 @@ def dandan_metadata():
     except importlib.metadata.PackageNotFoundError:
         version = None
     return {"module_path": spec.origin, "package_version": version}
-
-
-def token_digest(token_ids):
-    encoded = json.dumps(token_ids, separators=(",", ":")).encode("ascii")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def percentile(values, fraction):
-    ordered = sorted(values)
-    index = (len(ordered) - 1) * fraction
-    lower = int(index)
-    upper = min(lower + 1, len(ordered) - 1)
-    return ordered[lower] + (ordered[upper] - ordered[lower]) * (index - lower)
 
 
 def synchronize(device: str) -> None:

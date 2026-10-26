@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import torch
 
 from ..cache import PrefixCache
@@ -13,16 +11,10 @@ from ..sampling import sample_next_token
 from .request import GenerationRequest, RequestState
 
 
-@dataclass(frozen=True)
-class BatchStep:
-    prefill: tuple[GenerationRequest, ...]
-    decode: tuple[GenerationRequest, ...]
-
-
 class NativeBatchRuntime:
     """Connect a Scheduler to a NativeQwen3 model.
 
-    Decode executes before bounded, sequential prefill chunks. Shared complete
+    Decode executes before bounded, packed prefill chunks. Shared complete
     prompt pages are immutable; an exact hit can sample cached boundary logits
     without running the model. A partial hit computes only its uncached suffix.
     """

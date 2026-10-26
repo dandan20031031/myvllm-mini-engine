@@ -17,17 +17,21 @@ import os
 from pathlib import Path
 import platform
 import random
+import sys
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from benchmarks.common import percentiles, sha256_json as digest
+
+
 DEFAULT_PROMPTS = ["Explain KV Cache in one sentence.", "用一句话解释 continuous batching。"]
-
-
-def digest(value):
-    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def load_workload(path=None):
@@ -57,18 +61,6 @@ def load_workload(path=None):
                 raise ValueError("messages need a supported role and nonempty string content")
         normalized.append({"messages": [dict(message) for message in messages]})
     return normalized
-
-
-def percentiles(values):
-    values = sorted(value for value in values if value is not None)
-    if not values:
-        return {"count": 0, "p50": None, "p95": None}
-    def at(fraction):
-        index = (len(values) - 1) * fraction
-        lower = int(index)
-        upper = min(lower + 1, len(values) - 1)
-        return values[lower] + (values[upper] - values[lower]) * (index - lower)
-    return {"count": len(values), "p50": at(0.5), "p95": at(0.95)}
 
 
 class StreamProtocolError(ValueError):

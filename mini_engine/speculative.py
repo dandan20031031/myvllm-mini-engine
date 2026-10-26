@@ -11,7 +11,7 @@ import time
 
 import torch
 
-from .model.qwen3 import IncrementalGenerationResult
+from .model.outputs import IncrementalGenerationResult
 
 
 def prompt_lookup(tokens, max_tokens=4, *, min_ngram_size=2, max_ngram_size=4):

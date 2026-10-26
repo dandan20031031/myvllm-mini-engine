@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-import hashlib
 import json
 import math
 from pathlib import Path
@@ -29,7 +28,7 @@ configure_local_cache()
 import torch
 
 from mini_engine.model import NativeQwen3Runner
-from benchmarks.benchmark_chat_graph import gpu_snapshot, percentiles, sha256_json, source_metadata
+from benchmarks.common import gpu_snapshot, percentiles, sha256_json, source_metadata
 
 
 MODES = ("sequential_full_logits", "sequential_selected_logits", "ragged_selected_logits")
@@ -48,12 +47,7 @@ def synchronize(device):
 
 
 def source_fingerprint():
-    report = source_metadata()
-    files = dict(report["source_files_sha256"])
-    files[Path(__file__).relative_to(ROOT).as_posix()] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-    report["source_files_sha256"] = files
-    report["source_tree_sha256"] = sha256_json(files)
-    return report
+    return source_metadata(extra_files=(__file__,))
 
 
 def ragged_lengths(batch_size, maximum):

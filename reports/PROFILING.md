@@ -1,6 +1,6 @@
 # 推理引擎性能分析指南
 
-记录日期：2026-10-24（原阶段28）。实测摘要见 [stage28_profile_summary.json](stage28_profile_summary.json)，常规性能结论见 [系统验证与性能评测](VALIDATION_AND_BENCHMARKS.md)。
+记录日期：2026-10-24（原阶段28）。实测摘要见 [stage28_profile_summary.json](data/stage28_profile_summary.json)，常规性能结论见 [系统验证与性能评测](VALIDATION_AND_BENCHMARKS.md)。
 
 ## 入口与数据
 

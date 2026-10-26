@@ -1,7 +1,6 @@
 import torch
 
 from mini_engine.cache import BlockManager, PrefixCache
-from mini_engine.config import EngineConfig
 from mini_engine.engine.request import GenerationRequest, RequestState
 from mini_engine.engine.runtime import NativeBatchRuntime
 from mini_engine.engine.scheduler import Scheduler

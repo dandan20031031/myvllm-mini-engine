@@ -7,15 +7,9 @@ Graph calls and warmup are reported separately from paired warmed requests.
 from __future__ import annotations
 
 import argparse
-import csv
-from datetime import datetime, timezone
-import hashlib
-import io
 import json
-import os
 from pathlib import Path
 import platform
-import subprocess
 import sys
 import time
 
@@ -27,50 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from mini_engine.model import NativeQwen3Runner
 from mini_engine.runtime import configure_local_cache
-
-
-def sha256_json(value):
-    serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-
-
-def run_metadata_command(command):
-    try:
-        result = subprocess.run(command, cwd=PROJECT_ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, check=False)
-        return {"available": result.returncode == 0, "stdout": result.stdout.strip(), "error": result.stderr.strip() or None}
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"available": False, "stdout": "", "error": str(exc)}
-
-
-def source_metadata():
-    """Hash actual inference sources too, including an uncommitted checkout."""
-    files = sorted(path for path in (PROJECT_ROOT / "mini_engine").rglob("*") if path.is_file() and path.suffix in (".py", ".cu", ".cpp", ".h", ".cuh"))
-    files.append(Path(__file__).resolve())
-    hashes = {path.relative_to(PROJECT_ROOT).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in files}
-    commit = run_metadata_command(["git", "rev-parse", "HEAD"])
-    status = run_metadata_command(["git", "status", "--porcelain"])
-    return {
-        "git_commit": commit["stdout"] if commit["available"] else None,
-        "git_dirty": bool(status["stdout"]) if status["available"] else None,
-        "git_status": status["stdout"] if status["available"] else None,
-        "source_files_sha256": hashes, "source_tree_sha256": sha256_json(hashes),
-    }
-
-
-def gpu_snapshot():
-    fields = ["index", "uuid", "name", "driver_version", "pstate", "utilization.gpu", "utilization.memory", "memory.used", "clocks.current.graphics", "clocks.current.memory", "power.draw", "temperature.gpu"]
-    gpus = run_metadata_command(["nvidia-smi", "--query-gpu=" + ",".join(fields), "--format=csv,noheader,nounits"])
-    processes = run_metadata_command(["nvidia-smi", "--query-compute-apps=pid,process_name,used_gpu_memory", "--format=csv,noheader,nounits"])
-    return {
-        "observed_at_utc": datetime.now(timezone.utc).isoformat(), "benchmark_pid": os.getpid(),
-        "gpu_query_available": gpus["available"],
-        "gpus": [dict(zip(fields, row)) for row in csv.reader(io.StringIO(gpus["stdout"]), skipinitialspace=True)] if gpus["available"] else [],
-        "gpu_query_error": gpus["error"],
-        "compute_process_query_available": processes["available"],
-        "compute_processes": [dict(zip(("pid", "process_name", "memory_mib"), row)) for row in csv.reader(io.StringIO(processes["stdout"]), skipinitialspace=True)] if processes["available"] else [],
-        "compute_process_query_error": processes["error"],
-        "note": "Snapshots occur outside measured requests. WDDM can omit process/memory data; a snapshot cannot prove that the GPU remained idle or exclusively owned throughout the experiment.",
-    }
+from benchmarks.common import gpu_snapshot, percentiles, sha256_json, source_metadata
 
 
 def graph_status(runner):
@@ -95,18 +46,6 @@ def execute_request(runner, prompt, budget, *, use_cuda_graph):
 
 def requests_match(left, right):
     return left["token_ids"] == right["token_ids"] and left["finish_reason"] == right["finish_reason"]
-
-
-def percentiles(values):
-    values = sorted(value for value in values if value is not None)
-    if not values:
-        return {"count": 0, "p50": None, "p95": None}
-    def value_at(fraction):
-        location = (len(values) - 1) * fraction
-        lower = int(location)
-        upper = min(lower + 1, len(values) - 1)
-        return values[lower] + (values[upper] - values[lower]) * (location - lower)
-    return {"count": len(values), "p50": value_at(0.5), "p95": value_at(0.95)}
 
 
 def summarize_case(pairs, *, comparison_allowed=True):
@@ -208,7 +147,7 @@ def main():
     args.prompts = args.prompts or ["Explain KV Cache in one paragraph.", "用一小段话解释 continuous batching。"]
     configure_local_cache()
     torch.manual_seed(args.seed)
-    source_start = source_metadata()
+    source_start = source_metadata(extra_files=(__file__,))
     runner = NativeQwen3Runner.from_pretrained(
         args.model, device=args.device, dtype=torch.float16,
         prefill_backend=args.prefill_backend, decode_backend="cuda",
@@ -226,7 +165,7 @@ def main():
         runner.eos_token_ids = previous_eos
         runner.close()
     backend_end = runner.model.backend_report()
-    source_end = source_metadata()
+    source_end = source_metadata(extra_files=(__file__,))
     stable_files = source_start["source_tree_sha256"] == source_end["source_tree_sha256"] and backend_start == backend_end
     aligned = all(case["summary"]["comparison_allowed"] for case in cases)
     if not stable_files:
