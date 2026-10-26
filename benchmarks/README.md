@@ -5,6 +5,7 @@
 | 脚本 | 范围 |
 |---|---|
 | `benchmark_paged_sweep.py` | 原CUDA与D128向量化kernel配对Graph计时，5种block size；非服务延迟 |
+| `compare_paged_backends.py` | CUDA/Mini独立环境、实际张量哈希匹配、FP32 oracle及Graph/eager组件计时；不测引擎TPS |
 | `benchmark_native_batch.py` | 真实scheduler eager/Graph对照，实际token统计和后端指纹 |
 | `benchmark_ragged_prefill.py` | 同模型B1完整logits、B1末行logits、packed末行logits三路径forward消融；不测生成或HTTP |
 | `benchmark_speculative.py` | 普通greedy/投机输出一致性、接受率和单请求耗时 |
@@ -37,7 +38,9 @@ CUDA模式直接读paged KV；显式`auto/math/dandan`模式仍逐请求dense at
 
 ## Nano-vLLM / MiniVLLM 对照任务
 
-架构、采样/Graph边界与固定版本见[架构报告](../reports/ARCHITECTURE.md)，历史数据、差异和完整协议见[性能评测报告](../reports/VALIDATION_AND_BENCHMARKS.md)。本次只完成审计，尚未实现或运行共同adapter。
+架构、采样/Graph边界与固定版本见[架构报告](../reports/ARCHITECTURE.md)，历史数据、差异和完整协议见[性能评测报告](../reports/VALIDATION_AND_BENCHMARKS.md)。2026-10-26新增CUDA/Mini同输入PagedAttention组件对照，命令与限制见该报告；完整引擎共同adapter尚未实现，不能用组件结果宣布三方TPS排名。
+
+`compare_paged_backends.py`的调用链为：`make_case`生成CPU输入与实际字节哈希 → 延迟加载provider并转GPU → FP32分页GQA oracle → 计时前对拍 → 重复单算子的Graph Event/eager wall计时 → 计时后对拍 → 保存输入、源码、binary、GPU快照和样本。`comparison_guard`拒绝未匹配输入、错误或源码变动的数据，并始终禁止完整引擎TPS结论；Nano不在该组件脚本中。
 
 1. 固定模型哈希与离线token IDs；统一FP16、TP1、B=1/4/8/16、prompt128/512、输出128，分别eager/Graph。
 2. Nano/Mini原版不接受greedy；共同temperature=0.6、top-k禁用/top-p=1，固定输出长度与ignore-EOS适配须披露。随机采样文本不相同不能直接判错，另做teacher-forced数值验证。

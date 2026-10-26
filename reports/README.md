@@ -21,6 +21,7 @@ JSON保留原文件名与内容，便于追溯原实验。它们是对应日期�
 
 | 文件 | 用途 |
 |---|---|
+| [engine_comparison_20261026.json](data/engine_comparison_20261026.json) | 当前固定源码复核、CUDA/Mini同输入组件实测、环境/数值阻碍；不是三方完整引擎TPS排名 |
 | [ragged_prefill_summary.json](data/ragged_prefill_summary.json) | PrefillBatch/分页suffix/共享页与行选择的验收、原始记录入口和三路径forward消融；独立于decode或HTTP性能 |
 | [nano_mini_comparison_summary.json](data/nano_mini_comparison_summary.json) | 2026-10-25两个主对照的固定版本、历史性能来源/条件、源码与报告哈希、Windows可行性；不是新增跑分 |
 | [structure_validation_summary.json](data/structure_validation_summary.json) | 2026-10-25结构维护：403项回归、真实BF16 chunk/prefix/Graph/HTTP-SSE、资源归还和wheel检查 |

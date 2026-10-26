@@ -104,6 +104,8 @@ Ragged Prefill已接入：CUDA直接读paged历史，其他dense后端合批投�
 
 主对照为Nano-vLLM与Wenyueh/MinivLLM：架构和固定源码差异已核对，共同离线adapter及同条件性能矩阵尚未完成，当前没有三方速度排名。vLLM/SGLang只作架构参考，不作为Windows运行依赖。
 
+最新同输入PagedAttention组件测量中，Mini Triton在B1/B8短上下文更快，B32/2048时更接近。两边PyTorch版本不同，该结果不代表完整引擎TPS；数值对拍、条件和复现脚本见[当前对照记录](reports/VALIDATION_AND_BENCHMARKS.md)。
+
 ## 测试
 
 ```powershell

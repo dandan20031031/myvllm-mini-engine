@@ -126,7 +126,33 @@ $env:MINI_ENGINE_TEST_CUDA = "1"
 
 ## Nano-vLLM、MiniVLLM性能对照：现有证据与复测协议
 
-2026-10-25将两个小型引擎同时设为架构与性能主对照；vLLM/SGLang仅作工业源码参考。架构已按固定源码核对，见[主要对照](ARCHITECTURE.md)。**本次审计未运行新的三方GPU benchmark，当前没有同条件速度排名。**
+2026-10-25将两个小型引擎同时设为架构与性能主对照；vLLM/SGLang仅作工业源码参考。2026-10-26按本项目`fe61183`重新核对架构，并新增本项目/Mini的同输入单算子实测，见[主要对照](ARCHITECTURE.md)。**完整引擎的三方同条件速度排名仍未完成。**
+
+### 2026-10-26：同输入PagedAttention组件实测
+
+使用本机RTX5080、驱动617.42，依次运行本项目CUDA→Mini Triton→Mini Triton→本项目CUDA，四个独立进程顺序执行。两边均为FP16、Hq16/Hkv8、D128、block256、随机非连续物理页；每case的query、K/V cache、页表、长度五类张量SHA256在四次运行中完全一致。全部12组case及计时后的eager/Graph输出通过FP32 QK/softmax/PV oracle，`atol=0.006, rtol=0.03`，最大绝对差约2.33e-4。
+
+下表为每个进程6次采样的P50，再列出两次进程结果范围；不是置信区间。每次capture 50次算子调用，Event时间除以50；导入、JIT、输入生成/H2D、oracle、capture、预热和指纹采集在计时外。这里的Graph只包裹单算子重复调用，与完整模型decode Graph不同。
+
+| Batch / Context | 本项目内置CUDA Graph均摊P50 | Mini Triton Graph均摊P50 |
+|---|---:|---:|
+| 1 / 128 | 18.945–19.330 µs | 3.917–4.323 µs |
+| 8 / 512 | 40.340–40.422 µs | 14.308–14.834 µs |
+| 32 / 2048 | 396.343–396.744 µs | 361.462–366.140 µs |
+
+当前小batch/短上下文仍有明显组件耗时差距，大case更接近。不能据此宣称完整引擎相差相同倍率，也不能将原因直接归为某一条CUDA指令。eager wall在Mini短case波动明显，例如B1两次P50为16.915/37.515 µs，因此不据该口径给出稳定排名。此组只比较引擎内置CUDA PagedAttention，不含dandan_ops、模型GEMM、prefill、采样或调度。
+
+软件栈分别为Python3.13/PyTorch2.9.1+cu128，与Python3.11/PyTorch2.11.0+cu128/Triton3.8.0；Mini代码固定Windows提交`59466f60`，并记录实际模块路径。输入和GPU相同不代表软件环境相同，此结果仅是两套本机软件栈的组件对照。没有锁定GPU独占/频率，样本较少；Nano未在本机运行，不能补填其算子或整模型数值。
+
+复现入口为`benchmarks/compare_paged_backends.py`，不向引擎增加Triton运行依赖；用各自已安装的解释器执行，Mini provider延迟导入。脚本保存源码/二进制哈希、输入manifest、GPU快照与原始样本，比较guard始终禁止引擎TPS结论。实测摘要见[当前三项目对照](data/engine_comparison_20261026.json)，raw为`build/validation/paged_compare_{cuda_a1,mini_b1,mini_b2,cuda_a2}.json`。
+
+```powershell
+. .\scripts\enter_project.ps1
+.\.venv\Scripts\python benchmarks\compare_paged_backends.py --provider cuda --output build/validation/paged_compare_cuda.json
+& '..\MinivLLM-workspace\MinivLLM\.venv\Scripts\python.exe' benchmarks\compare_paged_backends.py --provider mini --mini-source ..\MinivLLM-workspace\MinivLLM-win\src --output build/validation/paged_compare_mini.json
+```
+
+新增4项CPU回归通过，覆盖输入确定性、GQA oracle、错误/环境/输入不匹配的比较保护及无Torch/Triton依赖的`--help`。本轮未修改推理运行代码，未重跑全量468项引擎回归或完整模型验收；下方测试和端到端性能仍保留各自原始日期。
 
 ### 已有数值能说明什么
 
@@ -170,6 +196,8 @@ Mini报告还需保留以下修正：
 Nano本地只有CPU测试提交，GPU runner在TP1仍无条件NCCL，并强制Triton/flash-attn；现有`.venv`缺少GPU运行依赖，不能在Windows直接运行。不会为跑分给引擎引入Linux/WSL依赖，也不悄悄将其attention换成我们的实现。如果后续有兼容Windows的原版后端或单独适配版本，需记录差异后补测；当前填“未测”。
 
 Mini可使用固定Windows分支`59466f60`；主checkout的Windows/Graph改动未提交，不能只记录其HEAD=00db3b47。现有解释器为Python3.11/Torch2.11，且editable安装仍指向迁移前目录；需用显式源码路径核验`myvllm.__file__`与源码哈希。我们的正式环境为Python3.13/Torch2.9；未统一软件栈前，不能发布严格归因的倍率。
+
+本次还实际探测了两项阻碍：直接默认FP16构造Mini RoPE时，仅1/64 inverse frequencies非零（FP32为64/64），且FP32 cos/sin cache会提升rotary输出dtype；完整模型统一FP16需先适配并验收。尝试在Mini的Torch2.11环境编译本项目CUDA扩展，在读取MSVC版本时遇到OEM `cp1`解码错误，未进入编译；保留错误后改为各自现有环境执行组件对照，没有修改Mini源码或屏蔽ABI检查。探测记录为`build/validation/mini_fp16_rope_probe.json`和`paged_comparison_compile_probe.json`。
 
 ## 保留的性能结果
 

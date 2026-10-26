@@ -173,13 +173,15 @@ runtime.close可重复调用，关闭后不再接受step；它不销毁runner的
 
 两者同时作为**架构、源码与性能对照对象**。功能对照基于固定提交的实际执行分支；性能另按模型、硬件、dtype、KV预算、输入token、采样与计时边界验收，不能从README吞吐或同名功能推导速度结论。
 
+2026-10-26重新核对本项目`fe61183`与下列固定源码。新增Ragged Prefill、选择性LM head及目录精简已纳入比较，不再使用“本项目尚无ragged”的旧结论。上游GitHub README已重新读取，但远端HEAD查询受网络/限流影响，所以下表是固定版本审计，不声明覆盖滚动最新版。Mini的upstream、Windows分支和未提交工作树分别记录。
+
 | 对照版本 | 固定依据与本地差异 |
 |---|---|
 | Nano-vLLM upstream | [`bb823b3e`](https://github.com/GeeeekExplorer/nano-vllm/commit/bb823b3e06983d71485a8e1f23715ebd87d98ef8)，本地`nano-vllm`的`origin/main`快照；不是滚动latest声明 |
 | Nano-vLLM本地 | `7074c1885c2e2e233822556cddde23044da40e82`，在上述版本上添加CPU测试、延迟导入和类型导入调整；GPU模型、attention和runner未改，不代表已适配Windows |
 | MiniVLLM upstream | [`00db3b477`](https://github.com/Wenyueh/MinivLLM/commit/00db3b477f33be1de91400483ae7d210c4d61868)；源码依据`git show REV:path`，不使用该checkout中未提交的Windows/Graph改动冒充upstream |
 | MiniVLLM本地Windows分支 | [`59466f60`](https://github.com/dandan20031031/MinivLLM/commit/59466f60ac82d388b2cfd8d9805a2090c33fd7a1)，增加gloo单进程回退、Windows/sm_120依赖与Graph修复；不是upstream原样执行。该checkout的README另有未提交编辑，不纳入源码结论 |
-| 本项目 | 结构维护基线`c9376f6b`，叠加本轮packed/paged prefill与选择性LM head；以本报告中的接口与ragged验收摘要为准 |
+| 本项目 | `fe61183f853a8187fce667fdd3c0a8acff20d235`；包含packed/paged prefill、选择性LM head和目录精简，原生入口为NativeQwen3Runner与closeable NativeBatchRuntime |
 
 ### 按实际计算与资源路径比较
 
@@ -188,7 +190,7 @@ runtime.close可重复调用，关闭后不再接受step；它不销毁runner的
 | 模型执行与投影 | 自有Qwen3 forward，默认合并QKV与Gate/Up；[`Qwen3模型`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/models/qwen3.py#L42) | 自有Qwen3/Llama模型和合并投影；[`模型入口`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/engine/model_runner.py#L29) | 原生dense Qwen3；QKV、Gate/Up融合可选，保留未融合与reference对拍路径 |
 | 权重加载 | 直接逐safetensors文件/参数加载，参数上的loader处理融合和TP；[`loader`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/utils/loader.py#L12) | 直接读safetensors，但先收集CPU权重字典，再映射/拼接；[`loader`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/utils/loader.py#L54) | HF加载浮点模型后通过meta/assign复用参数storage；尚无独立低峰值分片加载器 |
 | Prefill与decode attention | Triton写KV；prefill调用外部FlashAttention varlen，decode调用其paged KV接口；[`Attention.forward`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L59) | 自有Triton varlen prefill与paged decode；[`Attention.forward`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/layers/attention.py#L493)；不是调用相同外部FlashAttention库 | Windows CUDA paged decode与flat KV写入；CUDA prefill已直接读paged历史，其他后端逐请求dense attention；不等同外部varlen Flash |
-| Ragged与chunked prefill | flatten多个请求，准备cu_seqlens和绝对位置；支持chunked prefill，缓存命中时提供block tables；[`prepare_prefill`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L129) | 支持多请求flatten的varlen prefill；调度仍要求整条prompt满足token预算，所读版本无chunk进度协议；[`prepare_prefill`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/engine/model_runner.py#L265) | chunk进度接入PrefillBatch，投影/MLP合批；CUDA attention按请求边界直接paged执行，显式dense后端仍逐请求attention；完整Prefix命中留在batch外 |
+| Ragged与chunked prefill | flatten多个请求，准备cu_seqlens和绝对位置；每轮仅首条序列允许被token预算切块，prefix时提供block tables；[`prepare_prefill`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L129) | 支持多请求flatten的varlen prefill；调度仍要求整条prompt满足token预算，所读版本无chunk进度协议；[`prepare_prefill`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/engine/model_runner.py#L265) | chunk进度接入PrefillBatch，投影/MLP合批；CUDA attention按请求边界直接paged执行，显式dense后端仍逐请求attention；完整Prefix命中留在batch外 |
 | 调度与显存压力 | prefill优先，有prefill则该轮不decode；decode缺页时preempt并回队重算；[`Scheduler`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L30) | prefill优先、prefill/decode分轮，decode压力下抢占；另有永久超容量/无进度保护；[`Scheduler`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/engine/scheduler.py#L21) | decode优先，剩余预算推进prefill；按最坏输出增长做保守准入，淘汰Prefix pin；无安全preemption/recompute |
 | Prefix真实语义 | chained xxhash、token复核与页引用；释放请求后可保留空闲页hash供后续复用；最后一block不直接当完整命中；[`BlockManager`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L35) | 有hash/refcount结构，但释放页时清token_ids，完成请求不能成为后续warm prefix；prefill只处理本轮新K/V，不能据metadata字段宣称完整paged prefix复用已验收；[`释放与约束`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/engine/block_manager.py#L59) | 独立PrefixCache、完整block tuple索引、LRU/refcount；缓存边界logits，精确命中可跳过forward；当前是线性最长前缀查找 |
 | CUDA Graph边界 | 按batch分桶捕获transformer hidden-state forward；LM head、随机采样在图外；[`run_model/capture`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L195) | upstream与Windows固定提交均为hidden-state Graph，LM head/采样在图外；Windows提交修正bucket选取、padding slot和capture初始化；[`Windows修复`](https://github.com/dandan20031031/MinivLLM/blob/59466f60ac82d388b2cfd8d9805a2090c33fd7a1/src/myvllm/engine/model_runner.py#L354) | batch与block表宽度分桶；捕获完整decode logits并可包含greedy sampling，固定metadata与独立scratch；prefill、CPU调度仍在图外 |
@@ -198,6 +200,12 @@ runtime.close可重复调用，关闭后不再接受step；它不销毁runner的
 | Windows与依赖 | spawn启动，但TP1也无条件NCCL；强制Triton和flash-attn；[`runner`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L26)、[`依赖`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/pyproject.toml#L14) | upstream同样无条件NCCL，依赖含vllm；Windows分支增加gloo单进程回退和triton-windows/cu128配置，未移除Triton；[`upstream`](https://github.com/Wenyueh/MinivLLM/blob/00db3b477f33be1de91400483ae7d210c4d61868/src/myvllm/engine/model_runner.py#L26)、[`Windows依赖`](https://github.com/dandan20031031/MinivLLM/blob/59466f60ac82d388b2cfd8d9805a2090c33fd7a1/pyproject.toml#L7) | Windows原生MSVC/Ninja CUDA，不依赖NCCL、Linux、WSL或Triton；dandan_ops是可选独立库 |
 
 上述对照不把“源码中存在分支”等同“已完成本机性能验收”。Nano-vLLM本地CPU测试提交不解决NCCL/attention依赖；MiniVLLM的upstream、Windows提交、其他Graph/benchmark工作树也不能合并成一个未注明版本的结果。性能测试记录被测commit、dirty diff、平台适配、后端与图内范围；对照依赖单独隔离，不作为本引擎新增运行依赖。
+
+2026-10-26另核对Mini主checkout的未提交改动：它新增`capture_logits`，单卡默认把LM head也放进Graph，随机采样仍在图外。该工作树不是干净upstream或`59466f60`，不能用它的行为覆盖上表固定版本，也不能笼统声称“所有本机Mini Graph均不含LM head”。`MinivLLM-pr:46b8bf86`与`MinivLLM-bench:0ded3fd2`也是基于upstream的并列提交，未自动合并Windows、Graph和实验改动。
+
+精度适配同样属于执行契约。Mini固定源码的默认构造是FP32；直接将默认dtype改为FP16会让`base=1e6`的RoPE inverse frequency计算溢出。当前环境CPU探测为FP32时64/64频率非零，FP16时仅1/64；其FP32 cos/sin cache还会把未编译rotary输出提升为FP32。需要独立适配和teacher-forced验收，不能只以checkpoint或启动参数标记FP16。该探测没有修改Mini代码或验证其完整模型质量。
+
+本次定位：Nano强调极简离线推理和TP执行；Mini沿用相近引擎结构并自行实现Triton attention；本项目强调Windows原生CUDA、单卡服务、可选W4A16、Prefix边界语义和资源关闭。系统功能覆盖较广，仍需强化高性能prefill、压力下的并发利用率、量化质量与可比较的端到端数据。
 
 ### 源码对照后的落地与继续优化
 

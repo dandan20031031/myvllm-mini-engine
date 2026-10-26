@@ -1,0 +1,1707 @@
+{
+  "date": "2026-10-26",
+  "kind": "fixed_source_architecture_and_two_stack_component_comparison",
+  "repositories": {
+    "myvllm": {
+      "head": "fe61183f853a8187fce667fdd3c0a8acff20d235",
+      "branch": "codex/comparison-refresh",
+      "status": "M DEVELOPMENT_PLAN.md\n M benchmarks/README.md\n M reports/ARCHITECTURE.md\n M reports/README.md\n M reports/VALIDATION_AND_BENCHMARKS.md\n?? benchmarks/compare_paged_backends.py\n?? scripts/build_dandan_ops.ps1\n?? tests/test_paged_comparison.py"
+    },
+    "nano_local": {
+      "head": "7074c1885c2e2e233822556cddde23044da40e82",
+      "branch": "tests/cpu-unit-tests",
+      "status": ""
+    },
+    "MinivLLM": {
+      "head": "00db3b477f33be1de91400483ae7d210c4d61868",
+      "branch": "main",
+      "status": "M benchmark_tps.py\n M main.py\n M pyproject.toml\n M src/myvllm/engine/model_runner.py\n M uv.lock\n?? check_model.py\n?? profile_decode.py"
+    },
+    "MinivLLM-win": {
+      "head": "59466f60ac82d388b2cfd8d9805a2090c33fd7a1",
+      "branch": "feat/windows-support",
+      "status": "M README.md\n M README_zh.md"
+    },
+    "MinivLLM-pr": {
+      "head": "46b8bf8678f5ed9e76306c9032af897e855b607d",
+      "branch": "fix/cuda-graph-decode",
+      "status": ""
+    },
+    "MinivLLM-bench": {
+      "head": "0ded3fd263024dfc6fa13407fb8ef4cf1da6d835",
+      "branch": "bench/decode-profiling",
+      "status": ""
+    }
+  },
+  "remote_head_verification": "Official GitHub READMEs read live; ls-remote timed out and commits/API fetches were unavailable. Fixed source snapshots, not a rolling latest claim.",
+  "architecture_assessment": {
+    "ragged_and_selective_lmhead": "Current myvllm implements packed/paged prefill and selected rows; the former feature gap is closed, not a speed-equivalence claim.",
+    "nano_remaining_strengths": [
+      "Optimized external varlen/paged FlashAttention",
+      "TP linears and embedding/head",
+      "Chained block hashes and memory-pressure preemption/recompute",
+      "Shard-aware direct checkpoint loader and automatic KV capacity"
+    ],
+    "myvllm_scope": [
+      "Windows native CUDA",
+      "Decode-priority chunk scheduling and closed resource lifecycle",
+      "Complete Prefix blocks + boundary logits and exact-hit skip",
+      "Optional W4A16, HTTP/SSE and greedy prompt lookup"
+    ],
+    "mini_version_caveat": "Clean upstream/Windows graph captures hidden states. Dirty local main adds capture_logits for TP1, still samples outside graph; these states are not interchangeable.",
+    "mini_prefix_caveat": "Inspected fixed version clears token IDs on release and prefills only new K/V with positions restarting at zero; not a verified persistent warm-prefix path.",
+    "myvllm_limitations": [
+      "FP16 B2 strict elementwise KV threshold remains failed",
+      "No safe preemption/recompute or TP",
+      "CUDA prefill is correctness-first; dense backends still per-request attention",
+      "No same-condition three-engine end-to-end ranking"
+    ]
+  },
+  "component_measurement": {
+    "guard": {
+      "component_comparison_allowed": true,
+      "issues": [],
+      "same_environment": false,
+      "engine_throughput_comparison_allowed": false,
+      "note": "Independent environments; no engine TPS, automatic speed ratio or isolation guarantee."
+    },
+    "measurement": {
+      "calls_per_sample": 50,
+      "repetitions": 6,
+      "warmup": 2,
+      "atol": 0.006,
+      "rtol": 0.03,
+      "shape": "FP16 Hq16/Hkv8/D128/block256 random physical pages",
+      "graph": "50-op graph by default; device events divided by op count",
+      "eager": "Python callback launches plus final CUDA sync; wall divided by op count",
+      "excluded": "CPU generation/hash/H2D, oracle, validation, import/JIT, capture, warmup, metadata"
+    },
+    "execution_order": [
+      "cuda",
+      "mini",
+      "mini",
+      "cuda"
+    ],
+    "all_tensors_match": true,
+    "correctness_cases": 12,
+    "cases": [
+      {
+        "shape": {
+          "batch": 1,
+          "context": 128,
+          "heads": 16,
+          "kv_heads": 8,
+          "head_dim": 128,
+          "block_size": 256,
+          "seed": 20261026
+        },
+        "input": {
+          "shape": {
+            "batch": 1,
+            "context": 128,
+            "heads": 16,
+            "kv_heads": 8,
+            "head_dim": 128,
+            "block_size": 256,
+            "seed": 20261026
+          },
+          "tensors": {
+            "query": {
+              "shape": [
+                1,
+                16,
+                128
+              ],
+              "dtype": "torch.float16",
+              "sha256": "31581fc130c72625084931b5aa998ba4a9b55eed6f78502dc132882cd1bb40f3"
+            },
+            "key_cache": {
+              "shape": [
+                8,
+                256,
+                8,
+                128
+              ],
+              "dtype": "torch.float16",
+              "sha256": "e3628385c0e566dedd7a44585911e694eaf0a633690ec346628d281da3d62613"
+            },
+            "value_cache": {
+              "shape": [
+                8,
+                256,
+                8,
+                128
+              ],
+              "dtype": "torch.float16",
+              "sha256": "e4aa073655cdfa0d37bd7487d2d4c6941d53eda6190881696b82956037b0a156"
+            },
+            "block_tables": {
+              "shape": [
+                1,
+                1
+              ],
+              "dtype": "torch.int64",
+              "sha256": "7c9fa136d4413fa6173637e883b6998d32e1d675f88cddff9dcbcf331820f4b8"
+            },
+            "context_lens": {
+              "shape": [
+                1
+              ],
+              "dtype": "torch.int64",
+              "sha256": "b1b0bee5378188f5250138bcce25855f2617f9c55b20b9628e13d367c47404a9"
+            }
+          },
+          "case_sha256": "5f6944270018e1c2ae124f5fd724d0a6dd5c885beae05e2410612af8b4ca9e20"
+        },
+        "providers": {
+          "cuda": {
+            "graph_p50_us_per_call_range": [
+              18.944640159606934,
+              19.33023989200592
+            ],
+            "eager_p50_us_per_call_range": [
+              22.727000032318756,
+              25.280999980168417
+            ],
+            "max_absolute_oracle_error": 0.0002327561378479004
+          },
+          "mini": {
+            "graph_p50_us_per_call_range": [
+              3.917439877986908,
+              4.322880059480667
+            ],
+            "eager_p50_us_per_call_range": [
+              16.914999941946007,
+              37.51499993086327
+            ],
+            "max_absolute_oracle_error": 0.0002327561378479004
+          }
+        }
+      },
+      {
+        "shape": {
+          "batch": 8,
+          "context": 512,
+          "heads": 16,
+          "kv_heads": 8,
+          "head_dim": 128,
+          "block_size": 256,
+          "seed": 20261026
+        },
+        "input": {
+          "shape": {
+            "batch": 8,
+            "context": 512,
+            "heads": 16,
+            "kv_heads": 8,
+            "head_dim": 128,
+            "block_size": 256,
+            "seed": 20261026
+          },
+          "tensors": {
+            "query": {
+              "shape": [
+                8,
+                16,
+                128
+              ],
+              "dtype": "torch.float16",
+              "sha256": "385f3d5c482de245152eddb249ab44b91a4c24a5be4e9e2b9e64bc2015a5aa97"
+            },
+            "key_cache": {
+              "shape": [
+                23,
+                256,
+                8,
+                128
+              ],
+              "dtype": "torch.float16",
+              "sha256": "a88b16b9ca9ae41123c22ef351c2bb3169fb499e339ce9ccd9e76ab31f0cf5b1"
+            },
+            "value_cache": {
+              "shape": [
+                23,
+                256,
+                8,
+                128
+              ],
+              "dtype": "torch.float16",
+              "sha256": "574e066585153c46be3ae207481fe102684c5f2137f9d0fd4a93c75bab0d5630"
+            },
+            "block_tables": {
+              "shape": [
+                8,
+                2
+              ],
+              "dtype": "torch.int64",
+              "sha256": "fd766dbaac929ce80083d3d8578686b34ba4479ad175126bdea3f558eae84f4f"
+            },
+            "context_lens": {
+              "shape": [
+                8
+              ],
+              "dtype": "torch.int64",
+              "sha256": "7a6635c13f59f0912d34da441a202f28a071ef9dbeab9e9a78e1144c0efeda92"
+            }
+          },
+          "case_sha256": "5177406b99692bf7b0267b6f175a87a5ea5b19971d9a0636207990d0fc9a335e"
+        },
+        "providers": {
+          "cuda": {
+            "graph_p50_us_per_call_range": [
+              40.33984184265137,
+              40.422401428222656
+            ],
+            "eager_p50_us_per_call_range": [
+              49.24200002278667,
+              49.60899997968227
+            ],
+            "max_absolute_oracle_error": 0.00011211633682250977
+          },
+          "mini": {
+            "graph_p50_us_per_call_range": [
+              14.307519793510437,
+              14.833600521087646
+            ],
+            "eager_p50_us_per_call_range": [
+              17.077999946195632,
+              32.910000008996576
+            ],
+            "max_absolute_oracle_error": 0.00011211633682250977
+          }
+        }
+      },
+      {
+        "shape": {
+          "batch": 32,
+          "context": 2048,
+          "heads": 16,
+          "kv_heads": 8,
+          "head_dim": 128,
+          "block_size": 256,
+          "seed": 20261026
+        },
+        "input": {
+          "shape": {
+            "batch": 32,
+            "context": 2048,
+            "heads": 16,
+            "kv_heads": 8,
+            "head_dim": 128,
+            "block_size": 256,
+            "seed": 20261026
+          },
+          "tensors": {
+            "query": {
+              "shape": [
+                32,
+                16,
+                128
+              ],
+              "dtype": "torch.float16",
+              "sha256": "23bbde56d5160c2c2f0d4e82950668f5fde744d7a5a6b494229d25a1aae0f32e"
+            },
+            "key_cache": {
+              "shape": [
+                263,
+                256,
+                8,
+                128
+              ],
+              "dtype": "torch.float16",
+              "sha256": "baa92d7be48339a089488e3d130bf8e6fe7136905507a3964f0a798349621a0a"
+            },
+            "value_cache": {
+              "shape": [
+                263,
+                256,
+                8,
+                128
+              ],
+              "dtype": "torch.float16",
+              "sha256": "63a7f28913f45067fddb9785daf5bb3ad9e4cf8b212e4048d2b22a473bf86f1b"
+            },
+            "block_tables": {
+              "shape": [
+                32,
+                8
+              ],
+              "dtype": "torch.int64",
+              "sha256": "6d9ccae78f8684e830d1bdd510190e71cff17cd5c6d7de1df0354873bb7d2ef2"
+            },
+            "context_lens": {
+              "shape": [
+                32
+              ],
+              "dtype": "torch.int64",
+              "sha256": "a46aac673387e1a2c15d3954ad2d039a3dbebb622bc651e8ca7380809f15b792"
+            }
+          },
+          "case_sha256": "62c4ed8ec59ea5a92bb10c02948d587878a4ebbc2a37343a1e0919a4f38f1f31"
+        },
+        "providers": {
+          "cuda": {
+            "graph_p50_us_per_call_range": [
+              396.34271621704096,
+              396.74432754516596
+            ],
+            "eager_p50_us_per_call_range": [
+              403.8899999432033,
+              408.5299999132985
+            ],
+            "max_absolute_oracle_error": 6.029009819030762e-05
+          },
+          "mini": {
+            "graph_p50_us_per_call_range": [
+              361.46207809448237,
+              366.13983154296875
+            ],
+            "eager_p50_us_per_call_range": [
+              368.69199997454416,
+              381.1640000640182
+            ],
+            "max_absolute_oracle_error": 6.029009819030762e-05
+          }
+        }
+      }
+    ],
+    "runs": [
+      {
+        "raw": {
+          "path": "build/validation/paged_compare_cuda_a1.json",
+          "sha256": "cef3de8e8f68cc4b8fa8d841878f81a4c8240ceba6e598e265dd1eabbb3ceb14"
+        },
+        "provider": "cuda",
+        "status": "passed",
+        "environment": {
+          "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:09:58) [MSC v.1929 64 bit (AMD64)]",
+          "python_executable": "D:\\dandan123\\dandan\\myvllm\\.venv\\Scripts\\python.exe",
+          "torch": "2.9.1+cu128",
+          "torch_cuda": "12.8",
+          "nvcc": {
+            "available": true,
+            "stdout": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2026 NVIDIA Corporation\nBuilt on Tue_Jun__9_14:30:19_Pacific_Daylight_Time_2026\nCuda compilation tools, release 13.3, V13.3.73\nBuild cuda_13.3.r13.3/compiler.38244171_0",
+            "error": null
+          },
+          "gpu_name": "NVIDIA GeForce RTX 5080",
+          "capability": [
+            12,
+            0
+          ]
+        },
+        "source_unchanged": true,
+        "source_tree_sha256": "6b2a7eaccaf69b3cad55665f3fe76692cee1f83786c538a8a32156789f7e95c7",
+        "gpu_before": {
+          "observed_at_utc": "2026-10-26T15:46:38.322733+00:00",
+          "benchmark_pid": 46164,
+          "gpu_query_available": true,
+          "gpus": [
+            {
+              "index": "0",
+              "uuid": "GPU-a1d6cccd-9914-b6e6-2403-f72ad0d2f9dd",
+              "name": "NVIDIA GeForce RTX 5080",
+              "driver_version": "617.42",
+              "pstate": "P0",
+              "utilization.gpu": "6",
+              "utilization.memory": "1",
+              "memory.used": "3338",
+              "clocks.current.graphics": "1965",
+              "clocks.current.memory": "15201",
+              "power.draw": "51.19",
+              "temperature.gpu": "33"
+            }
+          ],
+          "note": "Snapshots occur outside measured requests. WDDM can omit process/memory data; a snapshot cannot prove that the GPU remained idle or exclusively owned throughout the experiment."
+        },
+        "gpu_after": {
+          "observed_at_utc": "2026-10-26T15:46:43.016395+00:00",
+          "benchmark_pid": 46164,
+          "gpu_query_available": true,
+          "gpus": [
+            {
+              "index": "0",
+              "uuid": "GPU-a1d6cccd-9914-b6e6-2403-f72ad0d2f9dd",
+              "name": "NVIDIA GeForce RTX 5080",
+              "driver_version": "617.42",
+              "pstate": "P0",
+              "utilization.gpu": "98",
+              "utilization.memory": "72",
+              "memory.used": "3405",
+              "clocks.current.graphics": "2820",
+              "clocks.current.memory": "15201",
+              "power.draw": "94.12",
+              "temperature.gpu": "44"
+            }
+          ],
+          "note": "Snapshots occur outside measured requests. WDDM can omit process/memory data; a snapshot cannot prove that the GPU remained idle or exclusively owned throughout the experiment."
+        },
+        "cases": [
+          {
+            "input_sha256": "5f6944270018e1c2ae124f5fd724d0a6dd5c885beae05e2410612af8b4ca9e20",
+            "correctness": {
+              "passed": true,
+              "finite": true,
+              "atol": 0.006,
+              "rtol": 0.03,
+              "max_absolute_error": 0.0002327561378479004,
+              "rms_error": 3.086761353188194e-05,
+              "outside_tolerance_fraction": 0.0
+            },
+            "post_timing_correctness": {
+              "eager": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 0.0002327561378479004,
+                "rms_error": 3.086761353188194e-05,
+                "outside_tolerance_fraction": 0.0
+              },
+              "graph": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 0.0002327561378479004,
+                "rms_error": 3.086761353188194e-05,
+                "outside_tolerance_fraction": 0.0
+              }
+            },
+            "timing_summary": {
+              "graph_device_event_ms_per_call": {
+                "count": 6,
+                "mean": 0.019527466893196108,
+                "p50": 0.018944640159606934,
+                "p95": 0.021660000383853913
+              },
+              "eager_wall_ms_per_call": {
+                "count": 6,
+                "mean": 0.02352233335841447,
+                "p50": 0.022727000032318756,
+                "p95": 0.028257000012672506
+              }
+            },
+            "samples": {
+              "graph_device_event_ms_per_call": [
+                0.0188755202293396,
+                0.018672000169754028,
+                0.0193612802028656,
+                0.01901376008987427,
+                0.02242624044418335,
+                0.01881600022315979
+              ],
+              "eager_wall_ms_per_call": [
+                0.022364000033121556,
+                0.024665999953867868,
+                0.023090000031515956,
+                0.0208240000938531,
+                0.029454000032274053,
+                0.020736000005854294
+              ]
+            }
+          },
+          {
+            "input_sha256": "5177406b99692bf7b0267b6f175a87a5ea5b19971d9a0636207990d0fc9a335e",
+            "correctness": {
+              "passed": true,
+              "finite": true,
+              "atol": 0.006,
+              "rtol": 0.03,
+              "max_absolute_error": 0.00011211633682250977,
+              "rms_error": 1.4912214282958303e-05,
+              "outside_tolerance_fraction": 0.0
+            },
+            "post_timing_correctness": {
+              "eager": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 0.00011211633682250977,
+                "rms_error": 1.4912214282958303e-05,
+                "outside_tolerance_fraction": 0.0
+              },
+              "graph": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 0.00011211633682250977,
+                "rms_error": 1.4912214282958303e-05,
+                "outside_tolerance_fraction": 0.0
+              }
+            },
+            "timing_summary": {
+              "graph_device_event_ms_per_call": {
+                "count": 6,
+                "mean": 0.04186837434768677,
+                "p50": 0.040422401428222655,
+                "p95": 0.04712992191314697
+              },
+              "eager_wall_ms_per_call": {
+                "count": 6,
+                "mean": 0.05141733335525108,
+                "p50": 0.04924200002278667,
+                "p95": 0.062194000056479126
+              }
+            },
+            "samples": {
+              "graph_device_event_ms_per_call": [
+                0.04018623828887939,
+                0.04054336071014404,
+                0.04030144214630127,
+                0.04927872180938721,
+                0.04068352222442627,
+                0.04021696090698242
+              ],
+              "eager_wall_ms_per_call": [
+                0.04593999998178333,
+                0.06504000004497357,
+                0.052082000038353726,
+                0.04538399996818043,
+                0.04640200000721961,
+                0.053656000090995803
+              ]
+            }
+          },
+          {
+            "input_sha256": "62c4ed8ec59ea5a92bb10c02948d587878a4ebbc2a37343a1e0919a4f38f1f31",
+            "correctness": {
+              "passed": true,
+              "finite": true,
+              "atol": 0.006,
+              "rtol": 0.03,
+              "max_absolute_error": 6.029009819030762e-05,
+              "rms_error": 7.568667570012622e-06,
+              "outside_tolerance_fraction": 0.0
+            },
+            "post_timing_correctness": {
+              "eager": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 6.029009819030762e-05,
+                "rms_error": 7.568667570012622e-06,
+                "outside_tolerance_fraction": 0.0
+              },
+              "graph": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 6.029009819030762e-05,
+                "rms_error": 7.568667570012622e-06,
+                "outside_tolerance_fraction": 0.0
+              }
+            },
+            "timing_summary": {
+              "graph_device_event_ms_per_call": {
+                "count": 6,
+                "mean": 0.39706528345743813,
+                "p50": 0.396744327545166,
+                "p95": 0.4056102466583252
+              },
+              "eager_wall_ms_per_call": {
+                "count": 6,
+                "mean": 0.40399633333436213,
+                "p50": 0.4038899999432033,
+                "p95": 0.408627500073635
+              }
+            },
+            "samples": {
+              "graph_device_event_ms_per_call": [
+                0.39371135711669925,
+                0.39936832427978514,
+                0.3984614562988281,
+                0.38813247680664065,
+                0.3950271987915039,
+                0.4076908874511719
+              ],
+              "eager_wall_ms_per_call": [
+                0.40094399999361485,
+                0.407437999965623,
+                0.39879200005088933,
+                0.409024000109639,
+                0.4052819999924395,
+                0.40249799989396706
+              ]
+            }
+          }
+        ],
+        "post_jit_provider_metadata_sha256": "67272949bc1b51fd18e353d30c50df16e41b586808d8bc5d74f6205c44bda1ad"
+      },
+      {
+        "raw": {
+          "path": "build/validation/paged_compare_mini_b1.json",
+          "sha256": "78583c9ebd663a51aec06c476709acfe85e783214d0c7663f315aafc7aa959a1"
+        },
+        "provider": "mini",
+        "status": "passed",
+        "environment": {
+          "python": "3.11.16 (main, Sep  1 2026, 14:15:24) [MSC v.1944 64 bit (AMD64)]",
+          "python_executable": "D:\\dandan123\\dandan\\MinivLLM-workspace\\MinivLLM\\.venv\\Scripts\\python.exe",
+          "torch": "2.11.0+cu128",
+          "torch_cuda": "12.8",
+          "nvcc": {
+            "available": true,
+            "stdout": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2026 NVIDIA Corporation\nBuilt on Tue_Jun__9_14:30:19_Pacific_Daylight_Time_2026\nCuda compilation tools, release 13.3, V13.3.73\nBuild cuda_13.3.r13.3/compiler.38244171_0",
+            "error": null
+          },
+          "gpu_name": "NVIDIA GeForce RTX 5080",
+          "capability": [
+            12,
+            0
+          ]
+        },
+        "source_unchanged": true,
+        "source_tree_sha256": "6b2a7eaccaf69b3cad55665f3fe76692cee1f83786c538a8a32156789f7e95c7",
+        "gpu_before": {
+          "observed_at_utc": "2026-10-26T15:46:56.690880+00:00",
+          "benchmark_pid": 28836,
+          "gpu_query_available": true,
+          "gpus": [
+            {
+              "index": "0",
+              "uuid": "GPU-a1d6cccd-9914-b6e6-2403-f72ad0d2f9dd",
+              "name": "NVIDIA GeForce RTX 5080",
+              "driver_version": "617.42",
+              "pstate": "P0",
+              "utilization.gpu": "5",
+              "utilization.memory": "1",
+              "memory.used": "2763",
+              "clocks.current.graphics": "1177",
+              "clocks.current.memory": "15201",
+              "power.draw": "43.51",
+              "temperature.gpu": "32"
+            }
+          ],
+          "note": "Snapshots occur outside measured requests. WDDM can omit process/memory data; a snapshot cannot prove that the GPU remained idle or exclusively owned throughout the experiment."
+        },
+        "gpu_after": {
+          "observed_at_utc": "2026-10-26T15:47:17.421661+00:00",
+          "benchmark_pid": 28836,
+          "gpu_query_available": true,
+          "gpus": [
+            {
+              "index": "0",
+              "uuid": "GPU-a1d6cccd-9914-b6e6-2403-f72ad0d2f9dd",
+              "name": "NVIDIA GeForce RTX 5080",
+              "driver_version": "617.42",
+              "pstate": "P0",
+              "utilization.gpu": "89",
+              "utilization.memory": "76",
+              "memory.used": "3313",
+              "clocks.current.graphics": "2805",
+              "clocks.current.memory": "15201",
+              "power.draw": "91.24",
+              "temperature.gpu": "40"
+            }
+          ],
+          "note": "Snapshots occur outside measured requests. WDDM can omit process/memory data; a snapshot cannot prove that the GPU remained idle or exclusively owned throughout the experiment."
+        },
+        "cases": [
+          {
+            "input_sha256": "5f6944270018e1c2ae124f5fd724d0a6dd5c885beae05e2410612af8b4ca9e20",
+            "correctness": {
+              "passed": true,
+              "finite": true,
+              "atol": 0.006,
+              "rtol": 0.03,
+              "max_absolute_error": 0.0002327561378479004,
+              "rms_error": 3.086760261794552e-05,
+              "outside_tolerance_fraction": 0.0
+            },
+            "post_timing_correctness": {
+              "eager": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 0.0002327561378479004,
+                "rms_error": 3.086760261794552e-05,
+                "outside_tolerance_fraction": 0.0
+              },
+              "graph": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 0.0002327561378479004,
+                "rms_error": 3.086760261794552e-05,
+                "outside_tolerance_fraction": 0.0
+              }
+            },
+            "timing_summary": {
+              "graph_device_event_ms_per_call": {
+                "count": 6,
+                "mean": 0.004232000062863032,
+                "p50": 0.004322880059480667,
+                "p95": 0.0044148800522089
+              },
+              "eager_wall_ms_per_call": {
+                "count": 6,
+                "mean": 0.038070333321229555,
+                "p50": 0.03751499993086327,
+                "p95": 0.04332899992732564
+              }
+            },
+            "samples": {
+              "graph_device_event_ms_per_call": [
+                0.0043001601099967954,
+                0.004431360065937042,
+                0.0037273600697517394,
+                0.004365440011024475,
+                0.004222080111503601,
+                0.004345600008964539
+              ],
+              "eager_wall_ms_per_call": [
+                0.0378919999639038,
+                0.03862199999275617,
+                0.04489799990551546,
+                0.03557200005161576,
+                0.03713799989782274,
+                0.034300000115763396
+              ]
+            }
+          },
+          {
+            "input_sha256": "5177406b99692bf7b0267b6f175a87a5ea5b19971d9a0636207990d0fc9a335e",
+            "correctness": {
+              "passed": true,
+              "finite": true,
+              "atol": 0.006,
+              "rtol": 0.03,
+              "max_absolute_error": 0.00011211633682250977,
+              "rms_error": 1.4912212463968899e-05,
+              "outside_tolerance_fraction": 0.0
+            },
+            "post_timing_correctness": {
+              "eager": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 0.00011211633682250977,
+                "rms_error": 1.4912212463968899e-05,
+                "outside_tolerance_fraction": 0.0
+              },
+              "graph": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 0.00011211633682250977,
+                "rms_error": 1.4912212463968899e-05,
+                "outside_tolerance_fraction": 0.0
+              }
+            },
+            "timing_summary": {
+              "graph_device_event_ms_per_call": {
+                "count": 6,
+                "mean": 0.014783466855684916,
+                "p50": 0.014833600521087646,
+                "p95": 0.014891359806060791
+              },
+              "eager_wall_ms_per_call": {
+                "count": 6,
+                "mean": 0.03142933336979089,
+                "p50": 0.032910000008996576,
+                "p95": 0.040519500071241055
+              }
+            },
+            "samples": {
+              "graph_device_event_ms_per_call": [
+                0.014851200580596923,
+                0.014510719776153565,
+                0.014891519546508789,
+                0.014890880584716796,
+                0.014740480184555054,
+                0.014816000461578369
+              ],
+              "eager_wall_ms_per_call": [
+                0.025772000080905855,
+                0.01756600002408959,
+                0.04133000009460375,
+                0.033343999966746196,
+                0.032476000051246956,
+                0.03808800000115298
+              ]
+            }
+          },
+          {
+            "input_sha256": "62c4ed8ec59ea5a92bb10c02948d587878a4ebbc2a37343a1e0919a4f38f1f31",
+            "correctness": {
+              "passed": true,
+              "finite": true,
+              "atol": 0.006,
+              "rtol": 0.03,
+              "max_absolute_error": 6.029009819030762e-05,
+              "rms_error": 7.568667115265271e-06,
+              "outside_tolerance_fraction": 0.0
+            },
+            "post_timing_correctness": {
+              "eager": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 6.029009819030762e-05,
+                "rms_error": 7.568667115265271e-06,
+                "outside_tolerance_fraction": 0.0
+              },
+              "graph": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 6.029009819030762e-05,
+                "rms_error": 7.568667115265271e-06,
+                "outside_tolerance_fraction": 0.0
+              }
+            },
+            "timing_summary": {
+              "graph_device_event_ms_per_call": {
+                "count": 6,
+                "mean": 0.36307114283243813,
+                "p50": 0.3614620780944824,
+                "p95": 0.36922574996948243
+              },
+              "eager_wall_ms_per_call": {
+                "count": 6,
+                "mean": 0.3684593333552281,
+                "p50": 0.36869199997454416,
+                "p95": 0.37636850003764266
+              }
+            },
+            "samples": {
+              "graph_device_event_ms_per_call": [
+                0.35936126708984373,
+                0.3615788650512695,
+                0.3613452911376953,
+                0.3603788757324219,
+                0.3705702209472656,
+                0.3651923370361328
+              ],
+              "eager_wall_ms_per_call": [
+                0.3619040000194218,
+                0.3689999999187421,
+                0.36321400009910576,
+                0.3696440000203438,
+                0.37861000004340895,
+                0.3683840000303462
+              ]
+            }
+          }
+        ],
+        "post_jit_provider_metadata_sha256": "9e929e7c2cfb98fd75658d55ba4f7d7fad25821b837869787aca14d6bc309a88"
+      },
+      {
+        "raw": {
+          "path": "build/validation/paged_compare_mini_b2.json",
+          "sha256": "104c79374fa48b000691be4fd68b66a7e55d7974246119c341718a0f4d1a6e4e"
+        },
+        "provider": "mini",
+        "status": "passed",
+        "environment": {
+          "python": "3.11.16 (main, Sep  1 2026, 14:15:24) [MSC v.1944 64 bit (AMD64)]",
+          "python_executable": "D:\\dandan123\\dandan\\MinivLLM-workspace\\MinivLLM\\.venv\\Scripts\\python.exe",
+          "torch": "2.11.0+cu128",
+          "torch_cuda": "12.8",
+          "nvcc": {
+            "available": true,
+            "stdout": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2026 NVIDIA Corporation\nBuilt on Tue_Jun__9_14:30:19_Pacific_Daylight_Time_2026\nCuda compilation tools, release 13.3, V13.3.73\nBuild cuda_13.3.r13.3/compiler.38244171_0",
+            "error": null
+          },
+          "gpu_name": "NVIDIA GeForce RTX 5080",
+          "capability": [
+            12,
+            0
+          ]
+        },
+        "source_unchanged": true,
+        "source_tree_sha256": "6b2a7eaccaf69b3cad55665f3fe76692cee1f83786c538a8a32156789f7e95c7",
+        "gpu_before": {
+          "observed_at_utc": "2026-10-26T15:47:28.563914+00:00",
+          "benchmark_pid": 30464,
+          "gpu_query_available": true,
+          "gpus": [
+            {
+              "index": "0",
+              "uuid": "GPU-a1d6cccd-9914-b6e6-2403-f72ad0d2f9dd",
+              "name": "NVIDIA GeForce RTX 5080",
+              "driver_version": "617.42",
+              "pstate": "P0",
+              "utilization.gpu": "5",
+              "utilization.memory": "1",
+              "memory.used": "2783",
+              "clocks.current.graphics": "1170",
+              "clocks.current.memory": "15201",
+              "power.draw": "43.45",
+              "temperature.gpu": "32"
+            }
+          ],
+          "note": "Snapshots occur outside measured requests. WDDM can omit process/memory data; a snapshot cannot prove that the GPU remained idle or exclusively owned throughout the experiment."
+        },
+        "gpu_after": {
+          "observed_at_utc": "2026-10-26T15:47:39.360609+00:00",
+          "benchmark_pid": 30464,
+          "gpu_query_available": true,
+          "gpus": [
+            {
+              "index": "0",
+              "uuid": "GPU-a1d6cccd-9914-b6e6-2403-f72ad0d2f9dd",
+              "name": "NVIDIA GeForce RTX 5080",
+              "driver_version": "617.42",
+              "pstate": "P0",
+              "utilization.gpu": "41",
+              "utilization.memory": "33",
+              "memory.used": "3392",
+              "clocks.current.graphics": "2865",
+              "clocks.current.memory": "15201",
+              "power.draw": "98.51",
+              "temperature.gpu": "37"
+            }
+          ],
+          "note": "Snapshots occur outside measured requests. WDDM can omit process/memory data; a snapshot cannot prove that the GPU remained idle or exclusively owned throughout the experiment."
+        },
+        "cases": [
+          {
+            "input_sha256": "5f6944270018e1c2ae124f5fd724d0a6dd5c885beae05e2410612af8b4ca9e20",
+            "correctness": {
+              "passed": true,
+              "finite": true,
+              "atol": 0.006,
+              "rtol": 0.03,
+              "max_absolute_error": 0.0002327561378479004,
+              "rms_error": 3.086760261794552e-05,
+              "outside_tolerance_fraction": 0.0
+            },
+            "post_timing_correctness": {
+              "eager": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 0.0002327561378479004,
+                "rms_error": 3.086760261794552e-05,
+                "outside_tolerance_fraction": 0.0
+              },
+              "graph": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 0.0002327561378479004,
+                "rms_error": 3.086760261794552e-05,
+                "outside_tolerance_fraction": 0.0
+              }
+            },
+            "timing_summary": {
+              "graph_device_event_ms_per_call": {
+                "count": 6,
+                "mean": 0.003960746675729752,
+                "p50": 0.003917439877986908,
+                "p95": 0.004164800122380257
+              },
+              "eager_wall_ms_per_call": {
+                "count": 6,
+                "mean": 0.017404666674944263,
+                "p50": 0.016914999941946007,
+                "p95": 0.019458500064502005
+              }
+            },
+            "samples": {
+              "graph_device_event_ms_per_call": [
+                0.0038975998759269714,
+                0.0039372798800468446,
+                0.0038495999574661255,
+                0.004223360121250153,
+                0.0038675200939178467,
+                0.003989120125770569
+              ],
+              "eager_wall_ms_per_call": [
+                0.01573800007463433,
+                0.016717999969841912,
+                0.01984600006835535,
+                0.01672999991569668,
+                0.017099999968195334,
+                0.018296000052941963
+              ]
+            }
+          },
+          {
+            "input_sha256": "5177406b99692bf7b0267b6f175a87a5ea5b19971d9a0636207990d0fc9a335e",
+            "correctness": {
+              "passed": true,
+              "finite": true,
+              "atol": 0.006,
+              "rtol": 0.03,
+              "max_absolute_error": 0.00011211633682250977,
+              "rms_error": 1.4912212463968899e-05,
+              "outside_tolerance_fraction": 0.0
+            },
+            "post_timing_correctness": {
+              "eager": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 0.00011211633682250977,
+                "rms_error": 1.4912212463968899e-05,
+                "outside_tolerance_fraction": 0.0
+              },
+              "graph": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 0.00011211633682250977,
+                "rms_error": 1.4912212463968899e-05,
+                "outside_tolerance_fraction": 0.0
+              }
+            },
+            "timing_summary": {
+              "graph_device_event_ms_per_call": {
+                "count": 6,
+                "mean": 0.014335466623306274,
+                "p50": 0.014307519793510437,
+                "p95": 0.014507359862327577
+              },
+              "eager_wall_ms_per_call": {
+                "count": 6,
+                "mean": 0.018215333305609722,
+                "p50": 0.017077999946195632,
+                "p95": 0.02220799997303402
+              }
+            },
+            "samples": {
+              "graph_device_event_ms_per_call": [
+                0.014298239946365357,
+                0.014250240325927734,
+                0.014257279634475708,
+                0.014316799640655518,
+                0.014569599628448487,
+                0.014320640563964844
+              ],
+              "eager_wall_ms_per_call": [
+                0.01734199991915375,
+                0.016980000073090196,
+                0.02382999999099411,
+                0.016983999958029017,
+                0.01707399991573766,
+                0.017081999976653606
+              ]
+            }
+          },
+          {
+            "input_sha256": "62c4ed8ec59ea5a92bb10c02948d587878a4ebbc2a37343a1e0919a4f38f1f31",
+            "correctness": {
+              "passed": true,
+              "finite": true,
+              "atol": 0.006,
+              "rtol": 0.03,
+              "max_absolute_error": 6.029009819030762e-05,
+              "rms_error": 7.568667115265271e-06,
+              "outside_tolerance_fraction": 0.0
+            },
+            "post_timing_correctness": {
+              "eager": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 6.029009819030762e-05,
+                "rms_error": 7.568667115265271e-06,
+                "outside_tolerance_fraction": 0.0
+              },
+              "graph": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 6.029009819030762e-05,
+                "rms_error": 7.568667115265271e-06,
+                "outside_tolerance_fraction": 0.0
+              }
+            },
+            "timing_summary": {
+              "graph_device_event_ms_per_call": {
+                "count": 6,
+                "mean": 0.3702366956075033,
+                "p50": 0.36613983154296875,
+                "p95": 0.38449695587158206
+              },
+              "eager_wall_ms_per_call": {
+                "count": 6,
+                "mean": 0.3803496666902599,
+                "p50": 0.3811640000640182,
+                "p95": 0.3914920000170241
+              }
+            },
+            "samples": {
+              "graph_device_event_ms_per_call": [
+                0.36072513580322263,
+                0.38662975311279296,
+                0.37809856414794923,
+                0.3678067016601563,
+                0.3636870574951172,
+                0.36447296142578123
+              ],
+              "eager_wall_ms_per_call": [
+                0.3803540000808425,
+                0.39376000000629574,
+                0.38197400004719384,
+                0.3745659999549389,
+                0.36675600000307895,
+                0.3846880000492092
+              ]
+            }
+          }
+        ],
+        "post_jit_provider_metadata_sha256": "9e929e7c2cfb98fd75658d55ba4f7d7fad25821b837869787aca14d6bc309a88"
+      },
+      {
+        "raw": {
+          "path": "build/validation/paged_compare_cuda_a2.json",
+          "sha256": "2046f830a56f2eb7bf85829c794acac5faa37d42e8a2f54b13f38ccbc615614f"
+        },
+        "provider": "cuda",
+        "status": "passed",
+        "environment": {
+          "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:09:58) [MSC v.1929 64 bit (AMD64)]",
+          "python_executable": "D:\\dandan123\\dandan\\myvllm\\.venv\\Scripts\\python.exe",
+          "torch": "2.9.1+cu128",
+          "torch_cuda": "12.8",
+          "nvcc": {
+            "available": true,
+            "stdout": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2026 NVIDIA Corporation\nBuilt on Tue_Jun__9_14:30:19_Pacific_Daylight_Time_2026\nCuda compilation tools, release 13.3, V13.3.73\nBuild cuda_13.3.r13.3/compiler.38244171_0",
+            "error": null
+          },
+          "gpu_name": "NVIDIA GeForce RTX 5080",
+          "capability": [
+            12,
+            0
+          ]
+        },
+        "source_unchanged": true,
+        "source_tree_sha256": "6b2a7eaccaf69b3cad55665f3fe76692cee1f83786c538a8a32156789f7e95c7",
+        "gpu_before": {
+          "observed_at_utc": "2026-10-26T15:48:12.102962+00:00",
+          "benchmark_pid": 42468,
+          "gpu_query_available": true,
+          "gpus": [
+            {
+              "index": "0",
+              "uuid": "GPU-a1d6cccd-9914-b6e6-2403-f72ad0d2f9dd",
+              "name": "NVIDIA GeForce RTX 5080",
+              "driver_version": "617.42",
+              "pstate": "P0",
+              "utilization.gpu": "5",
+              "utilization.memory": "1",
+              "memory.used": "2789",
+              "clocks.current.graphics": "1147",
+              "clocks.current.memory": "15201",
+              "power.draw": "43.90",
+              "temperature.gpu": "32"
+            }
+          ],
+          "note": "Snapshots occur outside measured requests. WDDM can omit process/memory data; a snapshot cannot prove that the GPU remained idle or exclusively owned throughout the experiment."
+        },
+        "gpu_after": {
+          "observed_at_utc": "2026-10-26T15:48:27.006550+00:00",
+          "benchmark_pid": 42468,
+          "gpu_query_available": true,
+          "gpus": [
+            {
+              "index": "0",
+              "uuid": "GPU-a1d6cccd-9914-b6e6-2403-f72ad0d2f9dd",
+              "name": "NVIDIA GeForce RTX 5080",
+              "driver_version": "617.42",
+              "pstate": "P0",
+              "utilization.gpu": "99",
+              "utilization.memory": "73",
+              "memory.used": "3325",
+              "clocks.current.graphics": "2610",
+              "clocks.current.memory": "15201",
+              "power.draw": "113.13",
+              "temperature.gpu": "46"
+            }
+          ],
+          "note": "Snapshots occur outside measured requests. WDDM can omit process/memory data; a snapshot cannot prove that the GPU remained idle or exclusively owned throughout the experiment."
+        },
+        "cases": [
+          {
+            "input_sha256": "5f6944270018e1c2ae124f5fd724d0a6dd5c885beae05e2410612af8b4ca9e20",
+            "correctness": {
+              "passed": true,
+              "finite": true,
+              "atol": 0.006,
+              "rtol": 0.03,
+              "max_absolute_error": 0.0002327561378479004,
+              "rms_error": 3.086761353188194e-05,
+              "outside_tolerance_fraction": 0.0
+            },
+            "post_timing_correctness": {
+              "eager": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 0.0002327561378479004,
+                "rms_error": 3.086761353188194e-05,
+                "outside_tolerance_fraction": 0.0
+              },
+              "graph": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 0.0002327561378479004,
+                "rms_error": 3.086761353188194e-05,
+                "outside_tolerance_fraction": 0.0
+              }
+            },
+            "timing_summary": {
+              "graph_device_event_ms_per_call": {
+                "count": 6,
+                "mean": 0.01995584011077881,
+                "p50": 0.01933023989200592,
+                "p95": 0.022253920435905458
+              },
+              "eager_wall_ms_per_call": {
+                "count": 6,
+                "mean": 0.026397666661068797,
+                "p50": 0.025280999980168417,
+                "p95": 0.030782499998167623
+              }
+            },
+            "samples": {
+              "graph_device_event_ms_per_call": [
+                0.019315199851989748,
+                0.019400320053100585,
+                0.019217920303344727,
+                0.02320512056350708,
+                0.019345279932022095,
+                0.019251199960708617
+              ],
+              "eager_wall_ms_per_call": [
+                0.02672799993888475,
+                0.031149999995250255,
+                0.02359599995543249,
+                0.029680000006919727,
+                0.023398000048473477,
+                0.023834000021452084
+              ]
+            }
+          },
+          {
+            "input_sha256": "5177406b99692bf7b0267b6f175a87a5ea5b19971d9a0636207990d0fc9a335e",
+            "correctness": {
+              "passed": true,
+              "finite": true,
+              "atol": 0.006,
+              "rtol": 0.03,
+              "max_absolute_error": 0.00011211633682250977,
+              "rms_error": 1.4912214282958303e-05,
+              "outside_tolerance_fraction": 0.0
+            },
+            "post_timing_correctness": {
+              "eager": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 0.00011211633682250977,
+                "rms_error": 1.4912214282958303e-05,
+                "outside_tolerance_fraction": 0.0
+              },
+              "graph": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 0.00011211633682250977,
+                "rms_error": 1.4912214282958303e-05,
+                "outside_tolerance_fraction": 0.0
+              }
+            },
+            "timing_summary": {
+              "graph_device_event_ms_per_call": {
+                "count": 6,
+                "mean": 0.04296330769856771,
+                "p50": 0.04033984184265137,
+                "p95": 0.04852096199989319
+              },
+              "eager_wall_ms_per_call": {
+                "count": 6,
+                "mean": 0.049917333308258094,
+                "p50": 0.04960899997968227,
+                "p95": 0.05441350000182865
+              }
+            },
+            "samples": {
+              "graph_device_event_ms_per_call": [
+                0.04028992176055908,
+                0.04785280227661133,
+                0.04024767875671387,
+                0.04038976192474365,
+                0.04025599956512451,
+                0.04874368190765381
+              ],
+              "eager_wall_ms_per_call": [
+                0.05339199997251853,
+                0.04576399995130487,
+                0.04637599995476194,
+                0.05475400001159869,
+                0.050047999975504354,
+                0.04916999998386018
+              ]
+            }
+          },
+          {
+            "input_sha256": "62c4ed8ec59ea5a92bb10c02948d587878a4ebbc2a37343a1e0919a4f38f1f31",
+            "correctness": {
+              "passed": true,
+              "finite": true,
+              "atol": 0.006,
+              "rtol": 0.03,
+              "max_absolute_error": 6.029009819030762e-05,
+              "rms_error": 7.568667570012622e-06,
+              "outside_tolerance_fraction": 0.0
+            },
+            "post_timing_correctness": {
+              "eager": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 6.029009819030762e-05,
+                "rms_error": 7.568667570012622e-06,
+                "outside_tolerance_fraction": 0.0
+              },
+              "graph": {
+                "passed": true,
+                "finite": true,
+                "atol": 0.006,
+                "rtol": 0.03,
+                "max_absolute_error": 6.029009819030762e-05,
+                "rms_error": 7.568667570012622e-06,
+                "outside_tolerance_fraction": 0.0
+              }
+            },
+            "timing_summary": {
+              "graph_device_event_ms_per_call": {
+                "count": 6,
+                "mean": 0.3975468826293945,
+                "p50": 0.396342716217041,
+                "p95": 0.40440304756164547
+              },
+              "eager_wall_ms_per_call": {
+                "count": 6,
+                "mean": 0.41156200000841636,
+                "p50": 0.4085299999132985,
+                "p95": 0.4210330000569229
+              }
+            },
+            "samples": {
+              "graph_device_event_ms_per_call": [
+                0.39623424530029294,
+                0.40459136962890624,
+                0.40383808135986327,
+                0.3964511871337891,
+                0.3942655944824219,
+                0.38990081787109376
+              ],
+              "eager_wall_ms_per_call": [
+                0.40657400008058175,
+                0.4094519998761825,
+                0.4226280000875704,
+                0.40686200009076856,
+                0.4076079999504145,
+                0.4162479999649804
+              ]
+            }
+          }
+        ],
+        "post_jit_provider_metadata_sha256": "67272949bc1b51fd18e353d30c50df16e41b586808d8bc5d74f6205c44bda1ad"
+      }
+    ],
+    "dandan_ops_included": false,
+    "scope": "PagedAttention only. Separate PyTorch2.9.1 and2.11 environments, same GPU/input FP16 tensors; no engine TPS or framework-only causal attribution.",
+    "limitations": [
+      "No exclusive-GPU or locked-clock guarantee",
+      "Only two processes per provider and six samples per case",
+      "Short eager wall times were unstable; do not rank engines from them",
+      "Nano was not benchmarked locally"
+    ],
+    "provider_metadata": {
+      "cuda": {
+        "module_file": "D:\\dandan123\\dandan\\myvllm\\mini_engine\\kernels\\paged.py",
+        "binary_file": "D:\\dandan123\\dandan\\myvllm\\build\\torch_extensions\\paged_attention\\a54846567e049ffb\\miniqwen_paged_attention_a54846567e049ffb.pyd",
+        "binary_sha256": "6d26f537f49f5691646024ed9a14104284f718dc2634827bf2a42c28a5b19939"
+      },
+      "mini": {
+        "module_file": "D:\\dandan123\\dandan\\MinivLLM-workspace\\MinivLLM-win\\src\\myvllm\\layers\\attention.py",
+        "triton_version": "3.8.0",
+        "source_files_sha256": {
+          "myvllm/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "myvllm/engine/block_manager.py": "fb3f3b555f29ec8e72fd1a29c26230131fed842fa2c070de4d4239c74841887a",
+          "myvllm/engine/llm_engine.py": "3025012f0b6fa620de8fc99313a80fe9cb9e08e1ec1a6a398b88a9efe5bff3c8",
+          "myvllm/engine/model_runner.py": "4846bb175ebc4f787c8720edc0e21e2709fb51c020af9bda49aae937b095d88a",
+          "myvllm/engine/scheduler.py": "7cf7aa30466c919b66734aa0bb0c5aa3acc45dc6b349dd9ddf1ba6b55ca7a3dc",
+          "myvllm/engine/sequence.py": "bfdca18e819e35038fd803751b6e47ab890497a50f9323b5abe5ef926940a86f",
+          "myvllm/layers/__init__.py": "6115655865d72c8e359da6e382b804ed37f2539c3a536e35d0033a227bcb17ad",
+          "myvllm/layers/activation.py": "12e655907b7c84463cdbdbdfb9e79901d3cecca580355196c762a300df6e03f3",
+          "myvllm/layers/attention.py": "f5159fab19cda253f8b2c0da0d310ba625349f1dea86b871b7c41aa11bb1c78e",
+          "myvllm/layers/embedding_head.py": "9130c67cf66be05a9fad267145895fb9b3edc90a90868fc029f9dba25c1bee07",
+          "myvllm/layers/layernorm.py": "dfa7b7322029127d8b5bdf4b9ee7f08cca33bd55f9612d1f1b9453d2da568586",
+          "myvllm/layers/linear.py": "e2335d2942c733f942e480eb26e7798ae0998f8ec9255df2ab37be29797f056c",
+          "myvllm/layers/rotary_embedding.py": "e4d389fee86809f0be48ec632b15c5da087af89f99527eccf47ce3287efbc731",
+          "myvllm/layers/sampler.py": "dd618f240553ec8c6677f6331ee5bb5c5bfde88d84bf373571d183ff64c42a30",
+          "myvllm/models/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "myvllm/models/llama.py": "9e00a1fa7cd91f0fe50ffb4ebf64b757474a4c834e7053446649f57899b13f7c",
+          "myvllm/models/qwen3.py": "cee3c18898f243276d11431c26ea9fbcc8599ce2084fe5a47a5ecc010692891c",
+          "myvllm/sampling_parameters.py": "f7017f69ec5d95b4f063f4073b8875a78c6c1f0921a4ecd73f262f56cc9d029e",
+          "myvllm/utils/__init__.py": "1217c5d078de709fc91c78f7edf4a1b3c697909f5881767e01684b65d1033d61",
+          "myvllm/utils/context.py": "f4b6775924085bb90826b2b0bde3ab5094842bec120cb751e3f9dd5e13e476f5",
+          "myvllm/utils/loader.py": "49e05f086dbc7bacbde155ef13a5b5ce695548b1bcffca092527212206027bf6"
+        },
+        "source_tree_sha256": "ee613269751d158dc5cc5a41fbdf3eb1add08926eb0bc99321d0cb07cc84c836",
+        "mini_git": {
+          "available": true,
+          "stdout": "59466f60ac82d388b2cfd8d9805a2090c33fd7a1",
+          "error": null
+        },
+        "compiled_kernels": [
+          {
+            "name": "paged_attention_decode_kernel",
+            "triton_hash": "8d1dda73777898a1e1239152516421b5fbdc058cbd785922862f5b730a0212b8",
+            "binary_sha256": "9889b1eb2ed5c283271edf7a95db4c533ca0a67aa047522c0144c965c4420341"
+          },
+          {
+            "name": "paged_attention_decode_kernel",
+            "triton_hash": "a1ac21804e61ddcd53651b6fb7000db759c0bb2e8ee0593ffc94648542deae67",
+            "binary_sha256": "7e2cd5d8f368dcb3eb6dd51635b2314ec07d0adce722f8cf42e8f9fafcacd723"
+          },
+          {
+            "name": "paged_attention_decode_kernel",
+            "triton_hash": "d094c6815ea6e1b5cd78df40dc4a76b7c16a50a6067961b08ae78d5c75043365",
+            "binary_sha256": "83a72bd591328ccdb15ba1371c10a919d7b01371f27040acd1662c15dcae00b8"
+          }
+        ]
+      }
+    },
+    "raw_evidence_note": "Full process snapshots and pre/post JIT metadata remain in the hashed local raw JSONs; public summary keeps device snapshots and post-JIT provider metadata."
+  },
+  "historical_end_to_end": {
+    "source": {
+      "path": "reports/data/nano_mini_comparison_summary.json",
+      "sha256": "c74ea52b31164e6c11f57bccd00ccf3be4b4baabe8ac8754e855e94b33c467c0"
+    },
+    "observations": {
+      "myvllm": {
+        "source": "reports/stage29_chat_graph_summary.json",
+        "source_sha256": "c88cf03eb5cde72f2096c5d2f5443334a44506e64726b20516404c78a2682da8",
+        "gpu": "RTX 5080",
+        "dtype": "fp16",
+        "batch_size": 1,
+        "sampling": "greedy",
+        "mode": "cuda_graph",
+        "cases": [
+          {
+            "prompt": "Explain KV Cache in one paragraph.",
+            "max_new_tokens": 64,
+            "ttft_p50_ms": 20.44000000023516,
+            "tpot_p50_ms": 2.529526190488786,
+            "output_tokens_per_second": 357.51177391529393
+          },
+          {
+            "prompt": "Explain KV Cache in one paragraph.",
+            "max_new_tokens": 128,
+            "ttft_p50_ms": 19.752650001464644,
+            "tpot_p50_ms": 2.6571842519742646,
+            "output_tokens_per_second": 355.03967961425985
+          },
+          {
+            "prompt": "用一小段话解释 continuous batching。",
+            "max_new_tokens": 64,
+            "ttft_p50_ms": 23.49320000030275,
+            "tpot_p50_ms": 2.586696031733207,
+            "output_tokens_per_second": 342.11182780396103
+          },
+          {
+            "prompt": "用一小段话解释 continuous batching。",
+            "max_new_tokens": 128,
+            "ttft_p50_ms": 24.39589999994496,
+            "tpot_p50_ms": 2.648231496074348,
+            "output_tokens_per_second": 355.10967918563443
+          }
+        ],
+        "scope": "Same loaded runner and weights; generate_incremental(use_cuda_graph=False/True) changes only the per-call decode path. Runner latency spans prefill through last emitted token, excluding tokenization/text decode; outer call wall time includes those. First calls, warmup, nvidia-smi, file hashes and git queries are excluded from warmed summaries. No profiler or model hooks are active."
+      },
+      "mini_vllm": {
+        "reports": [
+          {
+            "name": "MinivLLM-Benchmark-报告.md",
+            "archive_relative_to_workspace": "pagedattn-bench-report/MinivLLM-Benchmark-报告.md",
+            "archive_sha256": "40725f266a8a9998c7760ef7a92fd28c8149a3c2ff37113719370ac64e1fae14",
+            "report_commit": "0ded3fd263024dfc6fa13407fb8ef4cf1da6d835",
+            "committed_report_sha256": "40725f266a8a9998c7760ef7a92fd28c8149a3c2ff37113719370ac64e1fae14",
+            "archive_matches_committed_after_lf_normalization": true
+          },
+          {
+            "name": "MinivLLM-优化实验报告.md",
+            "archive_relative_to_workspace": "pagedattn-bench-report/MinivLLM-优化实验报告.md",
+            "archive_sha256": "470416908d7e748f6dc3959ce5c44964280a4affe1f9f6008be83adc9f116b17",
+            "report_commit": "0ded3fd263024dfc6fa13407fb8ef4cf1da6d835",
+            "committed_report_sha256": "470416908d7e748f6dc3959ce5c44964280a4affe1f9f6008be83adc9f116b17",
+            "archive_matches_committed_after_lf_normalization": true
+          }
+        ],
+        "reported_date": "2026-10-22",
+        "gpu": "RTX 5080",
+        "actual_compute_dtype": "fp32",
+        "checkpoint_load_dtype_does_not_define_parameter_dtype": true,
+        "sampling_temperature": 0.6,
+        "mode": "cuda_graph",
+        "max_model_length": 128,
+        "requested_max_output_tokens": 256,
+        "runtime_commit_recorded": false,
+        "raw_repetition_samples_available": false,
+        "reported_rows": [
+          {
+            "batch_size": 3,
+            "output_tokens": 336,
+            "latency_seconds_rounded": 0.569,
+            "reported_tps": 590.1
+          },
+          {
+            "batch_size": 8,
+            "output_tokens": 875,
+            "latency_seconds_rounded": 0.671,
+            "reported_tps": 1304.6
+          },
+          {
+            "batch_size": 16,
+            "output_tokens": 1732,
+            "latency_seconds_rounded": 0.916,
+            "reported_tps": 1890.8
+          }
+        ],
+        "measurement_caveat": "Median of three latencies combined with last run's token count; per-run samples unavailable; generate includes input/output processing."
+      },
+      "nano_vllm": {
+        "source": "upstream pinned README.md and bench.py",
+        "local_measurement": false,
+        "gpu": "RTX 4070 Laptop 8GB",
+        "actual_dtype_confirmed": false,
+        "requests": 256,
+        "input_length_range": [
+          100,
+          1024
+        ],
+        "output_length_range": [
+          100,
+          1024
+        ],
+        "reported_output_tokens": 133966,
+        "reported_seconds": 93.41,
+        "reported_tps": 1434.13
+      }
+    },
+    "cross_engine_ratio_allowed": false
+  },
+  "feasibility_probes": {
+    "mini_fp16_rope": {
+      "raw": {
+        "path": "build/validation/mini_fp16_rope_probe.json",
+        "sha256": "663d730810508d2c4b8f1f582dad6065b943d3c88eec04de6cc6dc4ccdfefae5"
+      },
+      "result": {
+        "kind": "mini_fp16_rope_construction_probe",
+        "performance_measurement": false,
+        "source": "D:\\dandan123\\dandan\\MinivLLM-workspace\\MinivLLM-win\\src\\myvllm\\layers\\rotary_embedding.py",
+        "python": "3.11.16 (main, Sep  1 2026, 14:15:24) [MSC v.1944 64 bit (AMD64)]",
+        "torch": "2.11.0+cu128",
+        "cases": [
+          {
+            "requested_dtype": "torch.float32",
+            "nonzero_inverse_frequencies": 64,
+            "inverse_frequency_count": 64,
+            "cache_dtype": "torch.float32",
+            "uncompiled_rotary_output_dtype": "torch.float32"
+          },
+          {
+            "requested_dtype": "torch.float16",
+            "nonzero_inverse_frequencies": 1,
+            "inverse_frequency_count": 64,
+            "cache_dtype": "torch.float32",
+            "uncompiled_rotary_output_dtype": "torch.float32"
+          }
+        ]
+      },
+      "interpretation": "Direct default-FP16 construction is not a validated Mini FP16 path. No model source was patched or full-model quality accepted."
+    },
+    "shared_torch211_cpp_compile": {
+      "raw": {
+        "path": "build/validation/paged_comparison_compile_probe.json",
+        "sha256": "a1c015074581fca09b0482711271e348777e25cf96981b46ae7747efe9b16a8b"
+      },
+      "status": "failed",
+      "error": "UnicodeDecodeError decoding MSVC version output with OEM cp1; before compilation.",
+      "resolution": "Kept ABI checks intact. Ran each component in its existing environment, not a shared-process or same-environment comparison."
+    }
+  },
+  "validation": {
+    "new_focused_cpu_tests": 4,
+    "all_component_cases_and_post_timing_checks_passed": true,
+    "full_engine_regression_rerun": false,
+    "previous_full_engine_tests": 468,
+    "previous_full_engine_evidence": "build/validation/structure_cleanup_pytest.xml",
+    "focused_cpu_tests_executed": 8,
+    "focused_cpu_junit": "build/validation/comparison_refresh_pytest.xml"
+  },
+  "next_steps": [
+    "Predeclared FP16 KV and longer quality validation",
+    "Profile low-batch paged decode; improve prefill backend based on full-model hotspot evidence",
+    "Implement common offline engine adapter only after valid dtype/model paths",
+    "Keep Nano Windows support and Mini adaptations explicit"
+  ],
+  "pinned_sources_from_prior_audit": {
+    "nano_vllm": {
+      "upstream_repository": "https://github.com/GeeeekExplorer/nano-vllm",
+      "upstream_snapshot": "bb823b3e06983d71485a8e1f23715ebd87d98ef8",
+      "local_head": "7074c1885c2e2e233822556cddde23044da40e82",
+      "gpu_source_windows_port": false,
+      "source_sha256": {
+        "nanovllm/engine/scheduler.py": "e7302942c967d50bb525384fa4a6e0de988d199490479d4f5965d4211bcdbd08",
+        "nanovllm/engine/model_runner.py": "2373c9daad7de3956905c9a0ec9d6b2e0a8d355a209162de8570507c5f419fd7",
+        "nanovllm/engine/block_manager.py": "d0240374f589eaa85c4c7923b8970f2635ab7bc73adc5044fa2d273955b54242",
+        "nanovllm/layers/embed_head.py": "e823fbd0a1eb9d64a90e93ade7d32f32235f0039bafc97d367d92a8ee06b3d0f",
+        "nanovllm/layers/attention.py": "00c2f52cd428bc2f82ff90ef8cbc96b0959a225daaeb035e9e0eaf63a85bfbba",
+        "nanovllm/sampling_params.py": "1e5146d1a06f5230ab049df1ea24814a1d73ba52c3ad22af04bd0f1c6293e0c0",
+        "bench.py": "42da1e51128ad0746a55be3ac3121268a343dd88d95687d9c2242e9dd3f85af6",
+        "README.md": "b6c5181482d451580c71688f5d8b48a50c05341d81695ed8a01962abd09ba486"
+      }
+    },
+    "mini_vllm": {
+      "upstream_repository": "https://github.com/Wenyueh/MinivLLM",
+      "upstream_snapshot": "00db3b477f33be1de91400483ae7d210c4d61868",
+      "windows_fork_repository": "https://github.com/dandan20031031/MinivLLM",
+      "windows_revision": "59466f60ac82d388b2cfd8d9805a2090c33fd7a1",
+      "upstream_checkout_has_uncommitted_runtime_patches": true,
+      "source_sha256": {
+        "src/myvllm/engine/scheduler.py": "9a1b3298d4493c52dec6bd344e14858b5da79178146b889597f9c3a029e0a633",
+        "src/myvllm/engine/model_runner.py": "e3ad76844ce44749ffdcda72c8bcb135c85dfd609a8be3afd454538607fd9650",
+        "src/myvllm/engine/block_manager.py": "44fcff90bf6a33f2bd0c0e8e3e620b1d03ccfcd65b4a35553acaa4f909822f7f",
+        "src/myvllm/layers/embedding_head.py": "28f771a7d7442b4179e4794e8cf029091d9a846f22650aeb159faaf35d95d421",
+        "src/myvllm/layers/attention.py": "e0cfbe1d8de3f368e668997068287c6b0f99c66e9ebd6da324ea281b26a4373e",
+        "src/myvllm/sampling_parameters.py": "696da171eebe5251227cd7faf8da84ca0f3b7c9e6c8de229f2cdf7dc11da42ad"
+      },
+      "windows_runner_sha256": {
+        "src/myvllm/engine/model_runner.py": "ca9760ea71934315847fd10cdb3aed90e6eb5076e9c161de439b85647d8771e2"
+      }
+    }
+  }
+}

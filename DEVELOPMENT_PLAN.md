@@ -20,6 +20,7 @@ FP16合批的严格逐元素KV阈值仍未通过。短生成一致和FP32对照�
 |---|---|---|
 | P0 数值边界 | FP16不同batch/投影形状的逐层误差与KV预算；扩展teacher-forced、较长生成和任务质量 | 预先定义误差协议、记录首个分歧位置；失败保留诊断，不为生成性能倍率临时放宽阈值 |
 | P1 Prefill效率 | 在当前packed/paged路径上分析attention、GEMM、metadata与LM head成本，再决定分块、融合或访存优化 | B1完整行/B1选择行/packed选择行独立消融；同时验收共享页只读、不同历史长度、跨页与Prefix边界 |
+| P1 小batch decode | 根据2026-10-26与Mini的同输入组件对照，分析B1/B8 PagedAttention的并行度、访存和同步成本 | 保留当前CUDA baseline，先数值对拍再重复受控组件测量；最后验证完整模型TPOT，不把算子差距外推为引擎倍率 |
 | P1 主对照 | Nano-vLLM和MiniVLLM共同离线adapter与固定工作量协议 | 同模型哈希、实际dtype、token IDs、输出预算、采样和KV预算；记录commit/dirty补丁、计时范围与逐次样本；缺平台条件标未测 |
 | P2 执行接口 | 减少CLI/Chat与batch路径在输入准备、采样、异常回收上的行为漂移 | 保留已支持的入口与结果语义；不为单卡项目引入多进程Executor或第二套调度框架 |
 | P2 后端契约 | 根据实际热点扩展dandan varlen/paged能力或形状路由 | 明确dense/paged、dtype/head_dim、suffix位置、workspace和Graph条件；库升级重新验收，不能将dense Flash称为paged/varlen集成 |
