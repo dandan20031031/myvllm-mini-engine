@@ -1,155 +1,168 @@
 # MiniQwenEngine
 
-面向 Qwen3-0.6B 的 Windows 11 单 GPU 推理引擎。Transformers负责权重和tokenizer加载；模型forward、分页KV、调度与CUDA算子由项目实现。支持本地Chat与HTTP/SSE。
+面向 Windows 11 的轻量级单 GPU 推理引擎，支持 Qwen3-0.6B 本地对话和 HTTP/SSE 服务。项目自行实现模型 forward、Paged KV Cache、连续批处理和 CUDA 算子，使用 Transformers 加载权重与 tokenizer，并作为正确性参考。
 
-[架构与实验报告](reports/README.md) · [后续开发计划](DEVELOPMENT_PLAN.md)
+## 主要功能
 
-## 已实现功能
-
-- 原生Qwen3：Q/K RMSNorm、RoPE、GQA、SwiGLU、增量与batch decode。
-- Paged KV Cache：跨页写入、引用计数、LRU、完整Prefix共享、命中跳过计算及边界logits复用。
-- Continuous batching：decode优先、token预算、chunked/ragged prefill、取消与异常回收。
-- 自有CUDA：PagedAttention、packed/paged prefill、Norm/Residual/SwiGLU、Embedding/RoPE/KV scatter和greedy argmax。
-- CUDA Graph：单请求/Chat及batch一token decode，固定metadata、独立scratch和图内greedy采样；QKV与Gate/Up投影融合。
-- 可选`dandan_ops`：FP16 Linear、D128 GQA dense Flash prefill、W4A16 CUDA计算。
-- Greedy prompt-lookup投机解码：草稿验证、接受/拒绝与KV回退；CLI、多轮Chat、Windows HTTP/SSE。
-
-| 精度 | 当前支持 |
-|---|---|
-| FP32 / FP16 / BF16 | 浮点模型；自有CUDA attention/elementwise要求FP16或BF16 |
-| INT4 + FP16 | 可选dandan W4A16真实CUDA计算；质量与速度需独立验证 |
-| INT8 / INT4 / FP8 E4M3、E5M2 | Weight-only reference，反量化后计算，不宣称加速 |
-| FP8 GEMM、FP8/INT8 KV、NVFP4、MXFP8 | 待实现，硬件支持不等于项目已接入 |
+- **原生 Qwen3**：Q/K RMSNorm、RoPE、GQA、SwiGLU，支持增量生成与 batch decode。
+- **Paged KV Cache**：分页读写、引用计数、LRU 回收，完整 block 的 Prefix Cache 共享与命中计算跳过。
+- **连续批处理**：decode 优先调度、token 预算、chunked/ragged prefill，以及请求取消和异常回收。
+- **CUDA 执行**：自有 PagedAttention、paged prefill、Norm、Residual、SwiGLU、Embedding、RoPE、KV scatter 和 greedy sampling；Linear 调用 cuBLAS/cuBLASLt，支持 QKV、Gate/Up 投影融合。
+- **CUDA Graph**：单请求与 batch 的单 token decode，可将 logits 和 greedy sampling 纳入图中。
+- **可选算子库**：接入 `dandan_ops` 的 FP16 Linear、D128 GQA dense Flash prefill 与 W4A16 计算。
+- **推理入口**：命令行、多轮 Chat、HTTP/SSE，以及单请求 greedy prompt-lookup 投机解码。
 
 ## 快速开始
 
-已验证环境为Windows 11、RTX5080、PyTorch2.9.1+cu128、Transformers4.57.6、MSVC和Ninja。引擎扩展使用Toolkit13.3并通过目标机测试；独立算子库此前用CUDA12.8构建。其他版本组合需要重新验证。
+以下命令使用 PowerShell。已有项目时，进入现有项目根目录并加载 `enter_project.ps1`，跳过克隆；已有虚拟环境或模型时，也可跳过对应步骤。编译 CUDA 扩展前需准备下方列出的运行环境。
 
-### 安装与模型
-
-先进入项目、设置项目缓存，再安装依赖，避免pip和编译产物写入默认系统盘路径：
+### 安装
 
 ```powershell
-Set-Location -LiteralPath 'D:\dandan123\dandan\myvllm'
+git clone https://github.com/dandan20031031/myvllm-mini-engine.git D:\myvllm-mini-engine
+Set-Location -LiteralPath 'D:\myvllm-mini-engine'
 . .\scripts\enter_project.ps1
 
-# 已有.venv可跳过创建
 python -m venv .venv
 .\.venv\Scripts\python -m pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128
-.\.venv\Scripts\python -m pip install -e ".[dev,model,cuda]"
+.\.venv\Scripts\python -m pip install -e ".[model,cuda]" "transformers==4.57.6"
 ```
 
-将完整HuggingFace `Qwen/Qwen3-0.6B` 模型目录放在`models/Qwen3-0.6B`，应包含config、tokenizer和safetensors权重。已有本地模型无需重新下载。虚拟环境、模型、缓存、CUDA构建和临时文件均在项目D盘目录，且不提交Git。
+项目环境脚本将 pip、Hugging Face、Torch、CUDA 编译缓存和临时目录设置在项目内。每次新开 PowerShell 后，先进入项目根目录，再执行 `. .\scripts\enter_project.ps1`。
 
-### 本地Chat
+### 下载模型
 
 ```powershell
-. .\scripts\enter_project.ps1
+.\.venv\Scripts\python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-0.6B', local_dir='models/Qwen3-0.6B')"
+```
+
+也可使用已有的完整模型目录，需包含 config、tokenizer 和 safetensors 权重，并在启动时调整 `--model`。
+
+### 本地对话
+
+```powershell
 .\.venv\Scripts\python -m mini_engine `
   --model .\models\Qwen3-0.6B --chat `
   --device cuda --dtype bf16 `
   --prefill-backend cuda --decode-backend cuda `
   --elementwise-backend cuda --data-backend cuda --linear-backend cuda `
-  --fuse-projections --cuda-graph --max-new-tokens 128 --local-files-only
+  --sampling-backend cuda --fuse-projections --cuda-graph `
+  --max-new-tokens 128 --local-files-only
 ```
 
-`/clear`重置消息，`/exit`退出。单轮推理将`--chat`替换为`--prompt "解释一下KV Cache"`。去掉`--cuda-graph`使用eager路径。
+输入 `/clear` 清空对话，输入 `/exit` 退出。单轮生成将 `--chat` 替换为 `--prompt "解释一下 KV Cache"`；去掉 `--cuda-graph` 使用 eager 执行。第一次运行需要编译 CUDA 扩展并捕获所需 Graph，耗时会高于后续请求。
 
-可选算子库需要单独安装：FP16 Linear用`--dtype fp16 --linear-backend dandan_cuda`；dense Flash prefill用`--prefill-backend dandan`；W4A16另加`--quantization int4 --quant-backend dandan`。不支持的dtype/head_dim/后端组合会报错，具体契约见[架构报告](reports/ARCHITECTURE.md)。
-
-投机解码使用eager路径，在命令中去掉`--cuda-graph`，加入`--speculative prompt_lookup --max-draft-tokens 4`，可选`--adaptive-draft`。普通问答未必受益，当前不支持服务batch或Graph投机。
-
-### HTTP / SSE
+### HTTP / SSE 服务
 
 ```powershell
 .\.venv\Scripts\python -m mini_engine.server `
   --model .\models\Qwen3-0.6B --served-model-name qwen3-0.6b `
   --device cuda --dtype bf16 --prefill-backend cuda --decode-backend cuda `
   --elementwise-backend cuda --data-backend cuda --linear-backend cuda `
-  --fuse-projections --cuda-graph --prefill-chunk-size 128 --local-files-only
+  --sampling-backend cuda --fuse-projections --cuda-graph `
+  --prefill-chunk-size 128 --local-files-only
 ```
 
-默认`http://127.0.0.1:8000/v1`。支持`GET /health`、`GET /v1/models`、`POST /v1/chat/completions`以及SSE与usage。请求使用`temperature: 0`，不支持tools、多模态或完整OpenAI API。默认Graph服务上下文上限为1024 tokens，超限请求提前拒绝。
-
-另开PowerShell调用：
+另开 PowerShell 发起请求：
 
 ```powershell
-$body = @{model='qwen3-0.6b'; messages=@(@{role='user'; content='解释KV Cache'}); max_tokens=64; temperature=0} | ConvertTo-Json -Depth 5
+$body = @{model='qwen3-0.6b'; messages=@(@{role='user'; content='解释 KV Cache'}); max_tokens=64; temperature=0} | ConvertTo-Json -Depth 5
 Invoke-RestMethod http://127.0.0.1:8000/v1/chat/completions -Method Post -ContentType 'application/json; charset=utf-8' -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
 ```
 
-Python集成使用`mini_engine.model.NativeQwen3Runner`；batch会话通过`runner.create_batch_runtime()`创建，并在结束时关闭runtime和runner。早期仅转发reference的`LLMEngine/EngineConfig`已移除；启动配置统一为`RunnerConfig`。
+Base URL 为 `http://127.0.0.1:8000/v1`。支持 `/health`、`/v1/models`、`/v1/chat/completions`；请求设置 `stream: true` 可使用 SSE。当前为 greedy 聊天子集，要求 `temperature: 0`，支持 usage，不支持 tools 或多模态。默认 Graph 服务的上下文上限为 1024 tokens，包含输入和输出预算。
+
+## 入口与脚本
+
+| 入口 | 作用 |
+|---|---|
+| `python -m mini_engine` | 单请求生成与交互式多轮 Chat |
+| `python -m mini_engine.server` | 单 GPU worker 驱动的 HTTP/SSE 服务 |
+| `benchmarks/benchmark_chat_graph.py` | 同一模型交替测量单请求 eager/Graph，记录首轮、TTFT、TPOT 与实际输出吞吐 |
+| `benchmarks/benchmark_native_batch.py` | 通过真实 scheduler/runtime 测量 batch eager/Graph |
+| `benchmarks/benchmark_paged_sweep.py` | PagedAttention 原实现与向量化实现、不同 block size 的算子对照 |
+| `benchmarks/compare_paged_backends.py` | 本项目 CUDA 与 Mini Triton 的同输入组件对照，使用各自独立环境 |
+| `benchmarks/profile_native_batch.py` | 采集 CPU/GPU 时间线、NVTX 与 Chrome trace，定位运行瓶颈 |
+
+更多对拍、prefill 消融和服务压测工具见 [Benchmark 说明](benchmarks/README.md)。
 
 ## 性能 Benchmark
 
-详细配置、逐次样本、数值边界和复现方法见[系统验证与性能评测](reports/VALIDATION_AND_BENCHMARKS.md)，全部工具见[benchmark目录](benchmarks/README.md)。以下均是原实验范围，不能互相拼接或当作行业排名。
+以下为已记录的实验结果，完整条件与原始证据见[性能评测报告](reports/VALIDATION_AND_BENCHMARKS.md)。
 
-| 实验 | 已记录结果 | 计时范围与限制 |
-|---|---|---|
-| FP16单请求Chat Graph，两prompt、64/128输出 | TPOT P50约2.53–2.66 ms；总输出342–358 TPS | 含prefill到末token，排除分词与文本decode；已预热，不是HTTP性能 |
-| FP16单请求选择性LM head，512-token prompt | 额外allocated峰值150.63→21.13 MiB | forward P50为76.29→75.91ms；其他长度未稳定提速 |
-| CUDA D128 PagedAttention | 相对原CUDA kernel观察1.74–1.80x | 配对Graph内单算子均摊，不是生成吞吐 |
-| BF16 Prefix Cache | 冷/热/5-token后缀实际计算64/0/5 tokens | 输出一致、共享页不变；不据此推断通用加速比 |
+### Qwen3-0.6B 单请求生成
 
-Ragged Prefill已接入：CUDA直接读paged历史，其他dense后端合批投影/MLP后逐请求attention。FP16 B2的严格KV逐元素检查仍未通过，短样例输出一致不证明batch invariance；多请求forward时间只作为探索记录，不发布正式倍率。
+RTX 5080，FP16，内置 CUDA 后端与 cuBLAS Linear，投影融合、CUDA greedy、decode Graph。两个 prompt，各输出 64/128 tokens，预热后每组重复 6 次。
+
+| 指标 | 已记录结果 |
+|---|---:|
+| TTFT P50 | 19.75–24.40 ms |
+| TPOT P50 | 2.53–2.66 ms/token |
+| 总输出吞吐 | 342.11–357.51 tokens/s |
+
+计时从 prefill 到最后一个输出 token，排除模型加载、分词、文本解码和首次 Graph 捕获。吞吐按实际输出 token 总数 / 请求总耗时计算；这是本地单请求生成结果，HTTP 与多请求吞吐需单独测量。
 
 ```powershell
-# 单请求eager / Graph，首轮与热启动分别记录
+# 单请求 eager / Graph 配对测量
 .\.venv\Scripts\python benchmarks\benchmark_chat_graph.py --model .\models\Qwen3-0.6B --dtype fp16 --ignore-eos
-# 真实调度runtime的batch测量
-.\.venv\Scripts\python benchmarks\benchmark_native_batch.py --help
-# CPU/CUDA时间线，结果放build/profiles；带插桩时间不作为跑分
-.\.venv\Scripts\python benchmarks\profile_native_batch.py --dtype fp16 --output-dir build/profiles/eager
+
+# 连续批处理，脚本自动运行 eager 与 Graph 两种模式
+.\.venv\Scripts\python benchmarks\benchmark_native_batch.py --model .\models\Qwen3-0.6B --dtype bf16 --fuse-projections --local-files-only --ignore-eos
 ```
 
-主对照为Nano-vLLM与Wenyueh/MinivLLM：架构和固定源码差异已核对，共同离线adapter及同条件性能矩阵尚未完成，当前没有三方速度排名。vLLM/SGLang只作架构参考，不作为Windows运行依赖。
+### PagedAttention 组件对照
 
-最新同输入PagedAttention组件测量中，Mini Triton在B1/B8短上下文更快，B32/2048时更接近。两边PyTorch版本不同，该结果不代表完整引擎TPS；数值对拍、条件和复现脚本见[当前对照记录](reports/VALIDATION_AND_BENCHMARKS.md)。
+2026-10-26 本机 RTX 5080 测量：FP16、Hq=16、Hkv=8、head_dim=128、block_size=256，随机非连续物理页。两边使用相同输入字节并通过 FP32 oracle 对拍；下表为两次独立进程的 Graph 均摊耗时 P50 范围，单位 µs。
 
-## 测试
+| Batch / Context | 本项目 CUDA | MiniVLLM Triton |
+|---|---:|---:|
+| 1 / 128 | 18.945–19.330 | 3.917–4.323 |
+| 8 / 512 | 40.340–40.422 | 14.308–14.834 |
+| 32 / 2048 | 396.343–396.744 | 361.462–366.140 |
+
+本项目使用 PyTorch 2.9.1+cu128；Mini 使用 2.11.0+cu128、Triton 3.8.0 和固定 Windows 修复版本。软件栈不同，GPU 未锁频，范围也不是置信区间。结果仅覆盖 PagedAttention 组件，完整模型还包含 GEMM、prefill、采样与调度。Nano-vLLM 未完成本机 GPU 验收，目前没有三方同条件引擎速度排名。[对照数据与复现方法](reports/VALIDATION_AND_BENCHMARKS.md)
+
+## 项目结构
+
+```text
+myvllm-mini-engine/
+├── mini_engine/
+│   ├── model/          原生 Qwen3、模型加载与 runner
+│   ├── cache/          KV 池、物理页与 Prefix Cache
+│   ├── engine/         请求、调度、ragged batch、runtime 与 CUDA Graph
+│   ├── kernels/        CUDA 源码、后端分发与数值 reference
+│   ├── quantization/   量化 reference 与 dandan W4A16 bridge
+│   ├── serving/        HTTP 协议、GPU worker 与 SSE
+│   ├── config.py       模型与后端配置
+│   └── cli.py          CLI / HTTP 共用启动参数
+├── benchmarks/         性能测量、正确性对拍与 profiling
+├── scripts/            Windows 环境脚本
+├── tests/              模型、算子、调度与服务回归
+└── reports/            架构与实验说明，测量摘要位于 data/
+```
+
+Python 集成入口为 `mini_engine.model.NativeQwen3Runner` 和 `mini_engine.RunnerConfig`；batch 会话通过 `runner.create_batch_runtime()` 创建。调用关系与资源生命周期见[架构说明](reports/ARCHITECTURE.md)。模型、虚拟环境、缓存和构建产物均已被 Git 忽略。
+
+## 运行环境与支持范围
+
+- **已验证环境**：Windows 11、RTX 5080、Python 3.13、PyTorch 2.9.1+cu128、Transformers 4.57.6、MSVC C++ Build Tools 与 Ninja；需要配置可用的 CUDA Toolkit 和编译器。
+- **CUDA 版本**：引擎扩展已在 Toolkit 13.3 上通过目标机测试；独立算子库此前使用 12.8 构建。其他 PyTorch / Toolkit / GPU 组合需要重新验证。
+- **浮点与量化**：支持 FP32/FP16/BF16 浮点路径，自有 CUDA attention 等算子要求 FP16/BF16。INT8/INT4/FP8 E4M3、E5M2 有反量化计算 reference；高性能 FP8 GEMM/KV、NVFP4、MXFP8 尚未实现。
+- **可选 dandan 后端**：单独安装算子库后，使用 `--dtype fp16 --linear-backend dandan_cuda`；dense Flash 使用 `--prefill-backend dandan`，W4A16 增加 `--quantization int4 --quant-backend dandan`，group size 为 64/128。质量与速度需按配置验收。
+- **当前边界**：单 GPU、Qwen3-0.6B、greedy 服务。CUDA prefill 直接读取分页历史；其他 prefill 后端仍逐请求做 dense attention。FP16 ragged 严格 KV 逐元素检查尚未通过，短输出一致不代表 batch invariance 已完成。
+- **Graph 与投机**：Graph 覆盖单 token decode，prefill 和 CPU 调度在图外。单请求 prompt lookup 使用 `--speculative prompt_lookup --max-draft-tokens 4`，需去掉 `--cuda-graph`；暂不支持 batch 投机。
+
+安装开发依赖后，可运行回归与完整模型验收：
 
 ```powershell
-. .\scripts\enter_project.ps1
+.\.venv\Scripts\python -m pip install -e ".[dev]"
 $env:MINI_ENGINE_TEST_CUDA = '1'
 .\.venv\Scripts\python -m pytest -q
 .\.venv\Scripts\python benchmarks\validate_system_extensions.py --dtype bf16 --http-smoke
 ```
 
-pytest缓存统一写到`build/pytest_cache`。该环境变量开启显式受控的CUDA专项；其他测试也可能按CUDA是否可用运行GPU，不代表取消变量就强制CPU。完整模型验收需要本地权重和GPU。历史验收及本轮结构精简后的结果见[验证报告](reports/VALIDATION_AND_BENCHMARKS.md)。
+完整模型验收需要本地权重与 GPU；pytest 缓存位于 `build/pytest_cache`。历史验证范围见[验证报告](reports/VALIDATION_AND_BENCHMARKS.md)。
 
-本轮全量468项测试通过、2个既有warning、无跳过；真实BF16模型的chunk/Prefix/batch Graph及HTTP/SSE验收通过。本轮结构整理没有新增性能结论。
+## 参考与许可证
 
-## 项目结构
-
-```text
-mini_engine/        仅推理运行代码
-├── config.py      RunnerConfig与QuantConfig
-├── cli.py         CLI/HTTP共享启动参数
-├── model/         原生Qwen3、runner、Transformers对拍与结果类型
-├── cache/         KV池、物理页管理、Prefix缓存
-├── engine/        请求、调度、PrefillBatch、runtime和decode Graph
-├── kernels/       CUDA源码、后端分发与数值reference
-├── quantization/  量化reference与dandan W4A16 bridge
-├── serving/       HTTP协议、单GPU worker和SSE传输
-└── __main__.py / server.py    Chat与HTTP入口
-benchmarks/        测量、对拍、profiling及共享实验工具
-scripts/           Windows项目环境脚本
-tests/            模型、算子、调度与服务回归
-reports/           主题报告；实验JSON集中在data/
-DEVELOPMENT_PLAN.md 当前优先级与开发约定
-```
-
-CLI直接运行单请求循环；HTTP worker使用`NativeBatchRuntime`。两者共享模型、KV与算子，调用方通过`finally`关闭自己创建的执行会话；资源所有权见[架构报告](reports/ARCHITECTURE.md)。模型、Toolkit、虚拟环境、缓存与build产物是本地运行依赖，均已忽略，不属于源码结构。
-
-## 当前限制
-
-- CUDA prefill仍以正确性为先；尚无算子库varlen Flash或统一prefill/decode混合GPU批次。
-- Prefix只共享完整block；KV保守预留，尚无preemption/recompute或异步overlap scheduler。
-- Graph覆盖一token decode与greedy，prefill、CPU调度、EOS和文本处理在图外。
-- W4A16质量集与多形状性能待扩展；FP8 GEMM/KV、NVFP4/MXFP8未实现。
-- 投机仅单请求greedy prompt lookup；小draft、随机校正及batch投机未实现。
-- 服务是本地greedy子集；多GPU、PD分离、多模态和新模型架构继续后置。
-
-## 许可证
-
-[Apache-2.0](LICENSE)。Qwen3权重与tokenizer遵循其自身许可证。
+参考 [vLLM](https://github.com/vllm-project/vllm)、[Nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm) 与 [MiniVLLM](https://github.com/Wenyueh/MinivLLM) 的推理机制与工程组织。代码采用 [Apache-2.0](LICENSE)；Qwen3 权重和 tokenizer 遵循其自身许可证。
