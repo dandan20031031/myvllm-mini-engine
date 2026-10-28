@@ -1,3 +1,9 @@
+<p align="center">
+  <img src="assets/cover.png" alt="MiniQwenEngine — Windows-native GPU inference" width="100%">
+</p>
+
+<p align="center"><strong>简体中文</strong> · <a href="README.en.md">English</a></p>
+
 # MiniQwenEngine
 
 面向 Windows 11 的轻量级单 GPU 推理引擎，支持 Qwen3-0.6B 本地对话和 HTTP/SSE 服务。项目自行实现模型 forward、Paged KV Cache、连续批处理和 CUDA 算子，使用 Transformers 加载权重与 tokenizer，并作为正确性参考。
