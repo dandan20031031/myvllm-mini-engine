@@ -1,8 +1,8 @@
-<p align="center"><img src="assets/cover.png" alt="MiniQwenEngine — Windows-native GPU inference" width="100%"></p>
+<p align="center"><img src="assets/cover.png" alt="mini-engine — Windows-native GPU inference" width="100%"></p>
 
 <p align="center"><a href="README.md">简体中文</a> · <strong>English</strong></p>
 
-# MiniQwenEngine
+# mini-engine
 
 A lightweight single GPU inference engine for Windows 11, with local Qwen3-0.6B chat and HTTP/SSE serving. The project implements the model forward pass, Paged KV Cache, continuous batching, and CUDA kernels. Transformers loads weights and the tokenizer and provides a correctness reference.
 

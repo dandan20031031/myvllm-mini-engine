@@ -1,4 +1,4 @@
-"""Standard-library OpenAI SSE load client for MiniQwenEngine/vLLM/SGLang.
+"""Standard-library OpenAI SSE load client for mini-engine/vLLM/SGLang.
 
 Measures client-observed request latency, including transport and server queueing.
 SSE content chunks are never treated as tokens: token metrics require usage.

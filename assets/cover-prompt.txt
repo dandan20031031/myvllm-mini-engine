@@ -1,10 +1,7 @@
-Use case: ads-marketing
-Asset type: GitHub README cover banner for an open-source GPU inference engine.
-Primary request: Create one polished, original technical cover for "MiniQwenEngine". Wide 3:1 horizontal composition, ideally 1536 x 512, with an opaque background and generous safe margins. It will appear at the top of both Chinese and English documentation.
-Scene/backdrop: Deep charcoal-blue matte background with subtle depth and a very restrained technical grid.
-Subject: A compact, abstract GPU processor linked to a small organized array of memory-page tiles and a flowing execution graph. The graphic should suggest paged KV memory and efficient token execution, without pretending to be a literal circuit schematic.
-Style/medium: Elegant editorial tech illustration combining crisp typography and refined isometric 3D forms. Minimal, precise, calm, professional engineering portfolio aesthetic.
-Composition/framing: Reserve roughly the left half for exceptionally readable typography; place the GPU/memory illustration on the right, with room around every element. The design must remain legible when scaled down in a README.
-Lighting/mood: Soft controlled illumination; a restrained cool cyan accent on graphite, with light ivory typography. Avoid excessive neon, bloom, noise, or glossy decoration.
-Text (verbatim): The large main title is "MiniQwenEngine". Spell it exactly, with capital M, Q and E, as one word. The smaller subtitle is "Windows-native GPU inference". A subtle smaller line may read "Qwen3 / CUDA / Paged KV".
-Constraints: Include only these text strings. This is a project cover, not a screenshot, not a benchmark chart and not an architecture diagram. No performance claims, no third-party logos, no NVIDIA/Windows logos, no badges, no watermark, no people, no robots, no mascots, no extra captions. Keep the entire title and illustration inside the frame.
+Use case: text-localization
+Asset type: GitHub README cover banner.
+Input image: the existing project cover is the edit target.
+Primary request: Change ONLY the large main project title in this image to the exact text "mini-engine".
+Text (verbatim): "mini-engine" — all lowercase ASCII letters, one ASCII hyphen between mini and engine; spell it m-i-n-i-"-"-e-n-g-i-n-e.
+Typography: Preserve the original large, bold, ivory sans-serif styling and its left alignment. Fit the shorter title naturally within the existing title area.
+Invariants: Keep the opaque background, wide 3:1 aspect ratio, overall dimensions and composition, GPU chip, memory-page tiles, glowing connections, execution graph, colors, shadows and all non-title details unchanged. Preserve the subtitle "Windows-native GPU inference" and the smaller line "Qwen3 / CUDA / Paged KV" exactly. Do not add any new text or logos.

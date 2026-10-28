@@ -49,7 +49,7 @@ def main():
             max_num_batched_tokens=args.max_num_batched_tokens)
         service.start()
         server = ChatHTTPServer((args.host, args.port), service)
-        print(f"MiniQwenEngine listening on http://{args.host}:{server.server_port}; greedy decoding")
+        print(f"mini-engine listening on http://{args.host}:{server.server_port}; greedy decoding")
         server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
         pass

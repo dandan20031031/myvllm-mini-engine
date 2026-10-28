@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "miniqwen-engine"
+name = "mini-engine"
 version = "0.1.0"
 description = "A Windows-native Qwen3 inference engine with paged KV, CUDA graphs and HTTP serving"
 license = {file = "LICENSE"}

@@ -32,7 +32,7 @@ def main():
     try:
         if args.chat:
             messages = []
-            print("MiniQwenEngine chat; type /exit to quit, /clear to reset.")
+            print("mini-engine chat; type /exit to quit, /clear to reset.")
             while True:
                 try:
                     user_text = input("you> ")
