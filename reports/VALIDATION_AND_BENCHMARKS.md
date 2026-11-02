@@ -2,6 +2,62 @@
 
 汇总既有验收与实验，以及2026-10-26目录精简后的回归。历史性能数据保留原版本及计时范围。实现约束见 [推理引擎架构与实现](ARCHITECTURE.md)，全部数据索引见 [技术报告目录](README.md)。
 
+## 2026-11-02 数值门禁与短上下文decode优化
+
+本轮只提交数值诊断、D128 decode专用路径及其对照工具，不包含工作区原有未提交的InferRSI实验。数据见[本轮结构化记录](data/decode_numerical_round_20261102.json)；完整raw、日志和JUnit位于`build/validation/decode_round_20261102/`。
+
+### 严格数值边界与一次被拒绝的优化
+
+边界按元素检查`abs(actual-reference) <= atol + rtol*abs(reference)`，任何非有限值失败。模型对照沿用`atol=0.125, rtol=0.01`，同时检查greedy token；不能仅凭短回答相同通过验收。`diagnose_ragged_prefill.py`新增首个超限索引/层、teacher-forced逐步logits与最新KV、参考top-2 margin和首个argmax分歧。所有路径消费相同的B1参考续写token，排除输入先分叉的混杂；这不是计时工具。
+
+初版将QK、softmax和PV都扩为16 warp：组件更快，但FP16中文prompt在预测步索引26出现3个新V元素超限，最大差0.23828125；该步logits仍通过且64个输出token完全一致。记录`generation_fp16.json`的整体`comparison_allowed=false`，未将它作为可发布的模型加速结果，也没有放宽阈值。
+
+最终仅把相互独立的QK点积由4 warp扩为16 warp，softmax和PV维持原来的128-thread/4-warp累加顺序。它通过`backend="cuda"`自动选择，条件为D128、batch≤8、页表总容量≤256 token；其他形状仍走既有实现。`cuda_vector128`保留本轮之前的向量化实现，`cuda_baseline`继续保留更早的scalar实现，均为算子实验接口而非新增CLI后端。调用链为`paged.py -> bindings.cpp -> launch -> attention_vector128<512>`，无需新的第三方运行依赖。
+
+### 组件配对测量
+
+RTX5080、驱动621.01、PyTorch2.9.1+cu128、Toolkit13.3。FP16/BF16、Hq16/Hkv8/D128，随机非连续物理页，block16/32/64/128/256；B/context覆盖1/17、1/128、8/256、8/512、32/2048。每case20对交替Graph Event测量，每Graph32次调用，导入/JIT、capture、预热、对拍、哈希与清理均在计时外。eager和捕获输出均对拍FP32计算reference；原始输入字节、源码与binary指纹一并记录。
+
+下表为block16、FP16，两次独立进程的P50范围，单位µs；范围不是置信区间。
+
+| B / Context | 旧4-warp实现 | 最终实现 |
+|---|---:|---:|
+| 1 / 17 | 4.714–4.736 | 3.946–3.971 |
+| 1 / 128 | 19.179–19.270 | 12.251–12.290 |
+| 8 / 256 | 38.302–38.483 | 24.171–24.575 |
+| 8 / 512 | 41.628–41.892 | 41.621–41.688 |
+| 32 / 2048 | 366.855–368.357 | 366.379–368.102 |
+
+短上下文候选范围内，FP16两轮与BF16一轮各15组观察约1.17–1.60x；其中128/256上下文约1.5–1.6x。512/2048继续调用原路径，波动不解释为新优化收益。单元测试另用FP32 oracle检验FP16/BF16、6种页大小、动态长度、非默认stream与共享页不变；新旧算子输出在这些case逐位一致。
+
+### 完整模型验证与性能
+
+`benchmark_decode_kernel.py`加载同一checkpoint的两个runner，单独capture旧/新Graph，固定两条prompt、greedy、每请求64输出、忽略EOS；各预热2轮后6对AB/BA测量。计时前通过eager teacher forcing逐步对拍64个位置的logits和新KV，再检查独立eager/Graph生成输出；这里不声称逐步抓取了完整模型Graph的所有中间状态。FP16/BF16四组teacher-forced对照的logits/K/V最大差均为0，生成token一致，测量期无新增capture，模型/源码指纹首尾相同。
+
+| 精度 / prompt | TPOT P50旧→新 ms/token | TPOT降低 | 总输出TPS旧→新 |
+|---|---:|---:|---:|
+| FP16 / 英文KV | 2.362→2.295 | 2.84% | 400.63→409.96 |
+| FP16 / 中文batching | 2.351→2.275 | 3.23% | 396.48→405.46 |
+| BF16 / 英文KV | 2.355→2.274 | 3.43% | 400.77→415.30 |
+| BF16 / 中文batching | 2.344→2.267 | 3.29% | 403.40→407.50 |
+
+TPS为实际输出token总数/请求总耗时，覆盖prefill到末token，排除分词和文本decode；TPOT为每请求生成间隔均值的分位数。TTFT没有一致改善。以上是本机小样本观察，GPU未锁频、未证明独占、未建立统计显著性，不是HTTP、多请求或长上下文收益，也不与旧驱动/旧日期的绝对值直接相除。
+
+### 原有ragged问题与回归范围
+
+32-token诊断复测仍有FP16 ragged prefill K/V超限29/138个元素，最大差0.96875/0.47265625，首次超限层索引均为12；teacher-forced最新KV在步索引22首次超限，但32个独立greedy输出仍相同。FP32数学对照仍有少量KV超过其原定1e-4门槛；不将“FP32误差较小”写成全量严格通过。本轮提升了定位与门禁能力，尚未解决ragged不同形状的误差，未发布其性能倍率或通用质量结论。
+
+本轮独立相关检查50项通过。当前完整工作区全量501 passed、2个既有warning、无跳过（包含原有未提交InferRSI测试；本轮新增16项），没有把它冒充干净HEAD的测试数。真实Qwen3 BF16通过chunk、Prefix、batch2/4 Graph及HTTP/SSE；FP16 dandan Linear+Flash、W4A16+Flash通过相应完整模型chunk/Prefix/batch Graph检查，各会话关闭后引用归零。未执行新的Compute Sanitizer或Nsight硬件counter。
+
+```powershell
+. .\scripts\enter_project.ps1
+# 对照本轮之前的向量化kernel，而不是更早的scalar kernel
+.\.venv\Scripts\python benchmarks\benchmark_paged_sweep.py --baseline-backend cuda_vector128 --block-sizes 16 32 64 128 256 --batches 1 1 8 8 32 --contexts 17 128 256 512 2048 --repetitions 20 --graph-repeats 32 --output build/validation/decode_kernel.json
+.\.venv\Scripts\python benchmarks\benchmark_decode_kernel.py --dtype fp16 --output build/validation/decode_model_fp16.json
+.\.venv\Scripts\python benchmarks\benchmark_decode_kernel.py --dtype bf16 --output build/validation/decode_model_bf16.json
+.\.venv\Scripts\python benchmarks\diagnose_ragged_prefill.py --output-tokens 32 --output build/validation/ragged_numerical.json
+```
+
 ## 2026-10-26 结构精简验收
 
 活动目录移除21份重复阶段Markdown、重复的项目总览、一次性缓存迁移脚本和旧能力快照。移除未进入真实推理路径的`LLMEngine/EngineConfig`、无使用方的`BatchStep`与通用callable benchmark包；CLI、HTTP、native/reference模型及数值oracle继续保留。README压缩至约150行，开发路线只保留当前优先级和约定。

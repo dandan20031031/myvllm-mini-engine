@@ -122,3 +122,32 @@ def test_native_logits_use_cuda_decode(dtype):
         b = model(token, cuda_cache, blocks, pos)
         torch.testing.assert_close(a, b, atol=0.06 if dtype == torch.bfloat16 else 0.015, rtol=0.02)
         assert a.argmax() == b.argmax()
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("block_size", [4, 16, 32, 64, 128, 256])
+def test_short_context_wide_warps_oracle_and_dynamic_graph_metadata(dtype, block_size):
+    # One partition exercises the new route; nonuniform lengths cover masks.
+    args = list(inputs(dtype, block_size=block_size, lengths=(1, 17, 127, 256)))
+    original_key, original_value = args[1].clone(), args[2].clone()
+    atol = 0.004 if dtype == torch.bfloat16 else 0.0006
+    from benchmarks.compare_paged_backends import TENSOR_NAMES, fp32_oracle
+    expected = fp32_oracle(dict(zip(TENSOR_NAMES, args[:-1])), block_size)
+    actual = paged_attention(*args, backend="cuda", validate=False)
+    torch.testing.assert_close(actual.float(), expected, atol=atol, rtol=0.015)
+    previous = paged_attention(*args, backend="cuda_vector128", validate=False)
+    # The accepted specialization preserves the previous accumulation tree.
+    assert torch.equal(actual, previous)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = paged_attention(*args, backend="cuda", validate=False)
+    args[4].copy_(torch.tensor([256, 128, 16, 1], device="cuda"))
+    args[0].mul_(0.75)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        graph.replay()
+        expected = fp32_oracle(dict(zip(TENSOR_NAMES, args[:-1])), block_size)
+    torch.cuda.current_stream().wait_stream(stream)
+    torch.testing.assert_close(captured.float(), expected, atol=atol, rtol=0.015)
+    assert torch.equal(original_key, args[1]) and torch.equal(original_value, args[2])

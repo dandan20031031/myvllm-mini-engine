@@ -33,6 +33,10 @@ from benchmarks.common import sha256_json, source_metadata
 
 
 def stats(actual, reference, atol, rtol):
+    if actual.shape != reference.shape or actual.numel() == 0:
+        raise ValueError("numerical comparison requires matching, nonempty shapes")
+    if not all(math.isfinite(x) and x >= 0 for x in (atol, rtol)):
+        raise ValueError("tolerances must be finite and nonnegative")
     actual, reference = actual.float(), reference.float()
     error = (actual - reference).abs()
     finite = torch.isfinite(actual) & torch.isfinite(reference)
@@ -43,7 +47,12 @@ def stats(actual, reference, atol, rtol):
         max_index.insert(0, max_flat % dimension)
         max_flat //= dimension
     ref_rms = float(reference.square().mean().sqrt())
+    indices = mismatch.nonzero()
+    first = indices[0].tolist() if indices.numel() else None
     return {"max_abs": float(error.max()), "max_index": max_index,
+            "first_mismatch_index": first,
+            "first_mismatch_error": float(error[tuple(first)]) if first is not None else None,
+            "first_mismatch_budget": float((atol + rtol * reference.abs())[tuple(first)]) if first is not None else None,
             "actual_at_max": float(actual[tuple(max_index)]),
             "reference_at_max": float(reference[tuple(max_index)]),
             "reference_max_abs": float(reference.abs().max()),
@@ -68,7 +77,64 @@ def kv_comparison(actual, reference, atol, rtol):
                     "head_reference_max_abs": scales.tolist()})
         layers.append(row)
     report["layers"] = layers
+    report["first_failing_layer"] = next((row["layer"] for row in layers if row["mismatched"]), None)
     return report
+
+
+def argmax_comparison(actual, reference):
+    """Report the reference top-two margin; ties/near-ties are not hidden."""
+    rows = []
+    for index, (a, b) in enumerate(zip(actual.float(), reference.float())):
+        finite = bool(torch.isfinite(a).all() and torch.isfinite(b).all())
+        top = b.topk(2).values if finite else None
+        rows.append({"request": index, "finite": finite,
+                     "actual_token": int(a.argmax()) if finite else None,
+                     "reference_token": int(b.argmax()) if finite else None,
+                     "reference_top2_margin": float(top[0] - top[1]) if top is not None else None,
+                     "match": finite and int(a.argmax()) == int(b.argmax())})
+    return rows
+
+
+@torch.inference_mode()
+def teacher_forced_trace(runner, case, mode, sequences, pages, tables, continuation):
+    """All modes consume the *same* B1-reference tokens, ignoring their argmax.
+
+    Snapshot logits and only the newest KV token per request. Full prompt KV is
+    already checked separately. CPU copies are diagnostic, never timed.
+    """
+    cache = runner.cache
+    cache.clear([page for table in pages for page in table])
+    logits = bench.execute_mode(runner, case, mode)
+    trace = []
+    for step in range(len(continuation[0])):
+        positions = [len(ids) - 1 if step == 0 else len(ids) + step - 1 for ids in sequences]
+        slots = [table[pos // cache.shape.block_size] * cache.shape.block_size + pos % cache.shape.block_size
+                 for table, pos in zip(pages, positions)]
+        slot_tensor = torch.tensor(slots, device=cache.device, dtype=torch.long)
+        trace.append({"logits": logits.detach().float().cpu().clone(),
+                      "kv": bench.cache_snapshot(cache, slot_tensor)})
+        if step + 1 < len(continuation[0]):
+            tokens = torch.tensor([row[step] for row in continuation], device=cache.device, dtype=torch.long)
+            positions = torch.tensor([len(ids) + step for ids in sequences], device=cache.device, dtype=torch.long)
+            logits = runner.model.forward_decode_batch(tokens, cache, tables, positions)
+    return trace
+
+
+def compare_teacher_forced(actual, reference, atol, rtol):
+    if not actual or len(actual) != len(reference):
+        raise ValueError("teacher-forced traces must have the same nonzero length")
+    steps = []
+    for index, (a, b) in enumerate(zip(actual, reference)):
+        row = {"step": index, "logits": stats(a["logits"], b["logits"], atol, rtol),
+               "argmax": argmax_comparison(a["logits"], b["logits"]),
+               "key": kv_comparison(a["kv"][0], b["kv"][0], atol, rtol),
+               "value": kv_comparison(a["kv"][1], b["kv"][1], atol, rtol)}
+        row["strict_passed"] = all(row[name]["mismatched"] == 0 for name in ("logits", "key", "value"))
+        steps.append(row)
+    return {"steps": steps, "all_steps_strict_passed": all(row["strict_passed"] for row in steps),
+            "first_failing_step": next((row["step"] for row in steps if not row["strict_passed"]), None),
+            "first_argmax_difference": next(({"step": row["step"], "request": request["request"]}
+                for row in steps for request in row["argmax"] if not request["match"]), None)}
 
 
 def clean_json(value):
@@ -121,6 +187,8 @@ def run_variant(runner, sequences, *, output_tokens=8, atol=0.125, rtol=0.01):
                     row.append(int(token))
             modes[mode]["generated_token_ids"] = outputs
         reference = modes[bench.MODES[0]]
+        traces = {mode: teacher_forced_trace(runner, case, mode, sequences, pages, tables,
+                                             reference["generated_token_ids"]) for mode in bench.MODES}
         comparisons = {}
         for mode in bench.MODES[1:]:
             comparisons[mode] = {
@@ -129,12 +197,16 @@ def run_variant(runner, sequences, *, output_tokens=8, atol=0.125, rtol=0.01):
                 "generated_token_ids_match": modes[mode]["generated_token_ids"] == reference["generated_token_ids"],
                 "key": kv_comparison(modes[mode]["kv"][0], reference["kv"][0], atol, rtol),
                 "value": kv_comparison(modes[mode]["kv"][1], reference["kv"][1], atol, rtol)}
+            comparisons[mode]["teacher_forced"] = compare_teacher_forced(
+                traces[mode], traces[bench.MODES[0]], atol, rtol)
         report = {"parameter_dtypes": sorted({str(parameter.dtype) for parameter in runner.model.parameters()}),
                   "cache_dtype": str(cache.dtype), "backends": runner.model.backend_report(),
                   "atol": atol, "rtol": rtol, "comparisons": comparisons,
                   "strict_elementwise_validation_passed": all(
                       row["logits"]["mismatched"] == row["key"]["mismatched"] == row["value"]["mismatched"] == 0
-                      and row["generated_token_ids_match"] for row in comparisons.values()),
+                      and row["generated_token_ids_match"]
+                      and row["teacher_forced"]["all_steps_strict_passed"] for row in comparisons.values()),
+                  "teacher_forced_token_sha256": sha256_json(reference["generated_token_ids"]),
                   "greedy_outputs": {mode: value["generated_token_ids"] for mode, value in modes.items()}}
         return report, modes
     finally:

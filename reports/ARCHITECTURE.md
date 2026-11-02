@@ -1,6 +1,6 @@
 # 推理引擎架构与实现
 
-更新至2026-10-26。范围为Windows 11单GPU、Qwen3-0.6B；HuggingFace负责权重加载、tokenizer和正确性参考，native forward、缓存、调度与CUDA扩展由项目实现。运行命令见[README](../README.md)，当前路线见[开发方案](../DEVELOPMENT_PLAN.md)，数值与性能证据见[验证报告](VALIDATION_AND_BENCHMARKS.md)。
+更新至2026-11-02。范围为Windows 11单GPU、Qwen3-0.6B；HuggingFace负责权重加载、tokenizer和正确性参考，native forward、缓存、调度与CUDA扩展由项目实现。运行命令见[README](../README.md)，当前路线见[开发方案](../DEVELOPMENT_PLAN.md)，数值与性能证据见[验证报告](VALIDATION_AND_BENCHMARKS.md)。
 
 ## 调用链与代码入口
 
@@ -121,7 +121,7 @@ capture本身也会写KV，必须使用与live页分离的scratch页；每个ina
 
 | 模块 | 实现与约束 |
 |---|---|
-| PagedAttention | FP16/BF16、GQA、非连续物理页、split-KV；D128使用Pack4对齐访问和warp归约，其他维度走原实现；`cuda_baseline`保留实验对照 |
+| PagedAttention | FP16/BF16、GQA、非连续物理页、split-KV；D128使用Pack4，batch≤8且单分区时以16 warp并行QK，softmax/PV保留4-warp归约顺序；其他形状走原实现；`cuda_baseline`与`cuda_vector128`保留对照 |
 | Elementwise/data | RMSNorm、Residual+RMSNorm、Residual Add、SiLU×Up、Embedding、RoPE和分页KV scatter；保留Torch reference |
 | Prefill/suffix | 新packed CUDA直接读paged KV、逐请求绝对causal与flat scatter；旧dense correctness helper保留8192 KV上限，新paged路径受模型/页表容量与head_dim约束；dandan仍为dense Flash |
 | Greedy采样 | 显式可选CUDA两级argmax，覆盖tie/NaN/Inf和词表尾部；仅temperature=0，默认Torch仍支持原采样 |

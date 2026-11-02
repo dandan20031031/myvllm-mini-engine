@@ -49,11 +49,12 @@ __device__ float block_reduce(float value, float* scratch) {
 // D=128 specialization. Warps share V work across tokens instead of having
 // every output dimension walk the entire sequence serially. All page addresses
 // remain direct: no dense K/V materialization and no GQA repeat tensor.
-template <typename scalar_t>
+template <typename scalar_t, int BLOCK_THREADS = THREADS>
 __global__ void attention_vector128(const scalar_t* query, const scalar_t* key,
     const scalar_t* value, const int64_t* tables, const int64_t* lengths,
     scalar_t* output, float* partial, float* lse, int heads, int kv_heads,
     int num_blocks, int block_size, int table_width, int partitions) {
+    constexpr int BLOCK_WARPS = BLOCK_THREADS / 32;
     const int request = blockIdx.x / heads, head = blockIdx.x % heads;
     const int kv_head = head / (heads / kv_heads), part = blockIdx.y;
     const int tid = threadIdx.x, lane = tid % 32, warp = tid / 32;
@@ -61,12 +62,12 @@ __global__ void attention_vector128(const scalar_t* query, const scalar_t* key,
     const int length = static_cast<int>(lengths[request]), start = part * PARTITION;
     const int count = length > start && length <= table_width * block_size
         ? min(PARTITION, length - start) : 0;
-    __shared__ float scores[PARTITION], scratch[WARPS], sums[WARPS][128];
+    __shared__ float scores[PARTITION], scratch[BLOCK_WARPS], sums[WARPS][128];
     Pack4<scalar_t> qp = reinterpret_cast<const Pack4<scalar_t>*>(query)[blockIdx.x * 32 + lane];
     float q[4];
     #pragma unroll
     for (int i=0; i<4; ++i) q[i] = static_cast<float>(qp.v[i]);
-    for (int t=warp; t<count; t+=WARPS) {
+    for (int t=warp; t<count; t+=BLOCK_WARPS) {
         int token = start+t;
         int64_t page = tables[static_cast<int64_t>(request)*table_width+token/block_size];
         bool valid = page>=0 && page<num_blocks;
@@ -82,17 +83,22 @@ __global__ void attention_vector128(const scalar_t* query, const scalar_t* key,
     }
     __syncthreads();
     float m = -INFINITY;
-    for (int t=tid; t<count; t+=THREADS) m=fmaxf(m,scores[t]);
+    // Only independent QK dot products use the wider block. Keep the original
+    // 128-thread softmax and four-warp PV accumulation order: changing those
+    // trees caused rare full-model FP16 KV tolerance violations despite equal
+    // greedy tokens. Extra warps participate in barriers but not these sums.
+    if (tid < THREADS)
+        for (int t=tid; t<count; t+=THREADS) m=fmaxf(m,scores[t]);
     m=block_reduce<true>(m,scratch);
     float sum=0.f;
-    for (int t=tid; t<count; t+=THREADS) {
+    for (int t=tid; tid<THREADS && t<count; t+=THREADS) {
         scores[t] = isfinite(m) ? expf(scores[t]-m) : 0.f;
         sum+=scores[t];
     }
     sum=block_reduce<false>(sum,scratch);
     if (tid==0 && partitions>1) lse[row]=sum>0.f ? m+logf(sum) : -INFINITY;
     float acc[4]={0.f,0.f,0.f,0.f};
-    for (int t=warp; t<count; t+=WARPS) {
+    for (int t=warp; warp<WARPS && t<count; t+=WARPS) {
         int token=start+t;
         int64_t page=tables[static_cast<int64_t>(request)*table_width+token/block_size];
         if (page>=0 && page<num_blocks) {
@@ -103,7 +109,7 @@ __global__ void attention_vector128(const scalar_t* query, const scalar_t* key,
         }
     }
     #pragma unroll
-    for (int i=0; i<4; ++i) sums[warp][lane*4+i]=acc[i];
+    for (int i=0; warp<WARPS && i<4; ++i) sums[warp][lane*4+i]=acc[i];
     __syncthreads();
     if (warp==0) {
         #pragma unroll
@@ -211,14 +217,24 @@ __global__ void merge_partitions(const float* partial, const float* lse,
 template <typename scalar_t, int DIM>
 void launch(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
             const at::Tensor& tables, const at::Tensor& lengths, at::Tensor& out,
-            at::Tensor& partial, at::Tensor& lse, int parts, cudaStream_t stream, bool vectorized) {
+            at::Tensor& partial, at::Tensor& lse, int parts, cudaStream_t stream, bool vectorized, bool wide) {
     int rows = static_cast<int>(q.size(0) * q.size(1));
     if (DIM == 128 && vectorized) {
+        // More warps shorten the serial token loops for small, single-partition
+        // decode. The original 4-warp route remains available for ablation.
+        if (wide && parts == 1 && q.size(0) <= 8) {
+        attention_vector128<scalar_t, 512><<<dim3(rows,parts), 512, 0, stream>>>(
+            q.data_ptr<scalar_t>(), k.data_ptr<scalar_t>(), v.data_ptr<scalar_t>(),
+            tables.data_ptr<int64_t>(), lengths.data_ptr<int64_t>(), out.data_ptr<scalar_t>(),
+            nullptr, nullptr,
+            q.size(1), k.size(2), k.size(0), k.size(1), tables.size(1), parts);
+        } else {
         attention_vector128<scalar_t><<<dim3(rows,parts), THREADS, 0, stream>>>(
             q.data_ptr<scalar_t>(), k.data_ptr<scalar_t>(), v.data_ptr<scalar_t>(),
             tables.data_ptr<int64_t>(), lengths.data_ptr<int64_t>(), out.data_ptr<scalar_t>(),
             parts>1 ? partial.data_ptr<float>() : nullptr, parts>1 ? lse.data_ptr<float>() : nullptr,
             q.size(1), k.size(2), k.size(0), k.size(1), tables.size(1), parts);
+        }
     } else {
     attention_partition<scalar_t, DIM><<<dim3(rows, parts), THREADS, 0, stream>>>(
         q.data_ptr<scalar_t>(), k.data_ptr<scalar_t>(), v.data_ptr<scalar_t>(),
@@ -237,8 +253,8 @@ void launch(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
 template <typename scalar_t>
 void dispatch(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
               const at::Tensor& tables, const at::Tensor& lengths, at::Tensor& out,
-              at::Tensor& partial, at::Tensor& lse, int parts, cudaStream_t stream, bool vectorized) {
-    #define HEAD_CASE(D) case D: launch<scalar_t, D>(q,k,v,tables,lengths,out,partial,lse,parts,stream,vectorized); break
+              at::Tensor& partial, at::Tensor& lse, int parts, cudaStream_t stream, bool vectorized, bool wide) {
+    #define HEAD_CASE(D) case D: launch<scalar_t, D>(q,k,v,tables,lengths,out,partial,lse,parts,stream,vectorized,wide); break
     switch (q.size(2)) {
         HEAD_CASE(16); HEAD_CASE(32); HEAD_CASE(64); HEAD_CASE(80);
         HEAD_CASE(96); HEAD_CASE(128); HEAD_CASE(192); HEAD_CASE(256);
@@ -248,7 +264,7 @@ void dispatch(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
 } // namespace
 
 at::Tensor paged_attention_cuda(const at::Tensor& q, const at::Tensor& k,
-    const at::Tensor& v, const at::Tensor& tables, const at::Tensor& lengths, int64_t block_size, bool vectorized) {
+    const at::Tensor& v, const at::Tensor& tables, const at::Tensor& lengths, int64_t block_size, bool vectorized, bool wide) {
     const c10::cuda::CUDAGuard guard(q.device());
     auto stream = c10::cuda::getCurrentCUDAStream(q.get_device()).stream();
     auto output = at::empty_like(q);
@@ -258,7 +274,7 @@ at::Tensor paged_attention_cuda(const at::Tensor& q, const at::Tensor& k,
         partial = at::empty({q.size(0), q.size(1), parts, q.size(2)}, q.options().dtype(at::kFloat));
         lse = at::empty({q.size(0), q.size(1), parts}, q.options().dtype(at::kFloat));
     }
-    if (q.scalar_type() == at::kHalf) dispatch<at::Half>(q,k,v,tables,lengths,output,partial,lse,parts,stream,vectorized);
-    else dispatch<at::BFloat16>(q,k,v,tables,lengths,output,partial,lse,parts,stream,vectorized);
+    if (q.scalar_type() == at::kHalf) dispatch<at::Half>(q,k,v,tables,lengths,output,partial,lse,parts,stream,vectorized,wide);
+    else dispatch<at::BFloat16>(q,k,v,tables,lengths,output,partial,lse,parts,stream,vectorized,wide);
     return output;
 }

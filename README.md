@@ -86,6 +86,7 @@ Base URL 为 `http://127.0.0.1:8000/v1`。支持 `/health`、`/v1/models`、`/v1
 | `python -m mini_engine.server` | 单 GPU worker 驱动的 HTTP/SSE 服务 |
 | `benchmarks/benchmark_chat_graph.py` | 同一模型交替测量单请求 eager/Graph，记录首轮、TTFT、TPOT 与实际输出吞吐 |
 | `benchmarks/benchmark_native_batch.py` | 通过真实 scheduler/runtime 测量 batch eager/Graph |
+| `benchmarks/benchmark_decode_kernel.py` | 旧/新 decode kernel 的完整模型数值门禁与单请求 Graph 配对测量 |
 | `benchmarks/benchmark_paged_sweep.py` | PagedAttention 原实现与向量化实现、不同 block size 的算子对照 |
 | `benchmarks/compare_paged_backends.py` | 本项目 CUDA 与 Mini Triton 的同输入组件对照，使用各自独立环境 |
 | `benchmarks/profile_native_batch.py` | 采集 CPU/GPU 时间线、NVTX 与 Chrome trace，定位运行瓶颈 |
@@ -127,6 +128,8 @@ RTX 5080，FP16，内置 CUDA 后端与 cuBLAS Linear，投影融合、CUDA gree
 | 32 / 2048 | 396.343–396.744 | 361.462–366.140 |
 
 本项目使用 PyTorch 2.9.1+cu128；Mini 使用 2.11.0+cu128、Triton 3.8.0 和固定 Windows 修复版本。软件栈不同，GPU 未锁频，范围也不是置信区间。结果仅覆盖 PagedAttention 组件，完整模型还包含 GEMM、prefill、采样与调度。Nano-vLLM 未完成本机 GPU 验收，目前没有三方同条件引擎速度排名。[对照数据与复现方法](reports/VALIDATION_AND_BENCHMARKS.md)
+
+2026-11-02 的本机配对实验中，短上下文 D128 decode 相对保留的旧向量化实现约快 1.5–1.6 倍；完整 Qwen3 FP16/BF16、单请求64输出的 TPOT P50 观察降低约2.8–3.4%。数值检查先于模型计时，归约顺序改变且KV超限的初版已被拒绝。这不是HTTP或跨引擎倍率；条件与未解决的ragged数值边界见[本轮评测](reports/VALIDATION_AND_BENCHMARKS.md)。
 
 ## 项目结构
 

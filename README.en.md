@@ -84,6 +84,7 @@ The base URL is `http://127.0.0.1:8000/v1`. Supported endpoints are `/health`, `
 | `python -m mini_engine.server` | HTTP/SSE serving through a single GPU worker |
 | `benchmarks/benchmark_chat_graph.py` | Alternate single-request eager/Graph runs on the same model; record first calls, TTFT, TPOT, and actual output throughput |
 | `benchmarks/benchmark_native_batch.py` | Measure batch eager/Graph execution through the actual scheduler/runtime |
+| `benchmarks/benchmark_decode_kernel.py` | Full-model numerical gates and paired single-request Graph measurements for old/new decode kernels |
 | `benchmarks/benchmark_paged_sweep.py` | Compare original and vectorized PagedAttention kernels across block sizes |
 | `benchmarks/compare_paged_backends.py` | Compare this project's CUDA and Mini Triton components with identical inputs in separate environments |
 | `benchmarks/profile_native_batch.py` | Collect CPU/GPU timelines, NVTX ranges, and Chrome traces to locate bottlenecks |
@@ -125,6 +126,8 @@ Measured locally on an RTX 5080 on 2026-10-26: FP16, Hq=16, Hkv=8, head_dim=128,
 | 32 / 2048 | 396.343–396.744 | 361.462–366.140 |
 
 This project used PyTorch 2.9.1+cu128; Mini used 2.11.0+cu128, Triton 3.8.0, and a pinned version with Windows fixes. The software stacks differ, GPU clocks were not locked, and the ranges are not confidence intervals. These results cover only PagedAttention. Full model execution also includes GEMM, prefill, sampling, and scheduling. Nano-vLLM has not completed local GPU validation, and no comparison of all three engines under matching conditions is available. [Comparison data and reproduction](reports/VALIDATION_AND_BENCHMARKS.md)
+
+In the local paired experiment on 2026-11-02, short-context D128 decode was about 1.5–1.6x faster than the retained previous vectorized implementation. Qwen3 FP16/BF16 single-request generation with 64 output tokens showed a roughly 2.8–3.4% reduction in TPOT P50. Numerical checks preceded model timing; an initial version that changed accumulation order and exceeded the KV tolerance was rejected. These are not HTTP or cross-engine speedups. See the [evaluation report](reports/VALIDATION_AND_BENCHMARKS.md) for conditions and the unresolved ragged numerical boundary.
 
 ## Project structure
 

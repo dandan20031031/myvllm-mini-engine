@@ -23,7 +23,7 @@ void write_kv_cache_batch_cuda(const at::Tensor& key_cache, const at::Tensor& va
 
 at::Tensor paged_attention_cuda(const at::Tensor& query, const at::Tensor& key,
     const at::Tensor& value, const at::Tensor& tables, const at::Tensor& lengths,
-    int64_t block_size, bool vectorized);
+    int64_t block_size, bool vectorized, bool wide);
 
 at::Tensor greedy_argmax_cuda(const at::Tensor& logits);
 
@@ -151,7 +151,7 @@ void write_kv_cache_batch_checked(const at::Tensor& key_cache, const at::Tensor&
 
 at::Tensor paged_attention(const at::Tensor& query, const at::Tensor& key,
     const at::Tensor& value, const at::Tensor& tables, const at::Tensor& lengths,
-    int64_t block_size, bool validate, bool vectorized) {
+    int64_t block_size, bool validate, bool vectorized, bool wide) {
     TORCH_CHECK(query.is_cuda(), "query must be CUDA");
     for (const auto& t : {key, value, tables, lengths}) {
         TORCH_CHECK(t.device() == query.device(), "all inputs must be on the same CUDA device");
@@ -180,7 +180,7 @@ at::Tensor paged_attention(const at::Tensor& query, const at::Tensor& key,
         auto active = positions.unsqueeze(0) < lengths.unsqueeze(1);
         TORCH_CHECK(!(((tables < 0) | (tables >= key.size(0))) & active).any().item<bool>(), "physical block id out of range");
     }
-    return paged_attention_cuda(query, key, value, tables, lengths, block_size, vectorized);
+    return paged_attention_cuda(query, key, value, tables, lengths, block_size, vectorized, wide);
 }
 
 at::Tensor greedy_argmax_checked(const at::Tensor& logits) {
@@ -195,12 +195,16 @@ at::Tensor greedy_argmax_checked(const at::Tensor& logits) {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("paged_attention", [](const at::Tensor& q,const at::Tensor& k,const at::Tensor& v,
         const at::Tensor& t,const at::Tensor& l,int64_t b,bool validate) {
-        return paged_attention(q,k,v,t,l,b,validate,true);
+        return paged_attention(q,k,v,t,l,b,validate,true,true);
     }, "FP16/BF16 split-KV paged decode attention");
     m.def("paged_attention_baseline", [](const at::Tensor& q,const at::Tensor& k,const at::Tensor& v,
         const at::Tensor& t,const at::Tensor& l,int64_t b,bool validate) {
-        return paged_attention(q,k,v,t,l,b,validate,false);
+        return paged_attention(q,k,v,t,l,b,validate,false,false);
     }, "Scalar baseline for performance ablation");
+    m.def("paged_attention_vector128", [](const at::Tensor& q,const at::Tensor& k,const at::Tensor& v,
+        const at::Tensor& t,const at::Tensor& l,int64_t b,bool validate) {
+        return paged_attention(q,k,v,t,l,b,validate,true,false);
+    }, "Previous 4-warp D128 implementation for numerical/performance ablation");
     m.def("greedy_argmax", &greedy_argmax_checked, "Stable two-pass CUDA greedy sampling");
     m.def("rms_norm", &rms_norm_checked, "FP16/BF16 RMSNorm");
     m.def("residual_rms_norm", &residual_rms_norm_checked, "FP16/BF16 residual RMSNorm");

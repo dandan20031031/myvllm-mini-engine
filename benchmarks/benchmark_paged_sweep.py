@@ -17,6 +17,7 @@ import torch
 from mini_engine.runtime import configure_local_cache
 from mini_engine.kernels.paged import paged_attention
 from mini_engine.kernels.cuda_extension import load_cuda_extension
+from benchmarks.common import source_metadata
 
 
 def gpu_snapshot():
@@ -38,9 +39,9 @@ def capture(call, repeats):
     return graph, output
 
 
-def measure_pair(case, repetitions, graph_repeats):
+def measure_pair(case, repetitions, graph_repeats, baseline_backend="cuda_baseline"):
     graphs = {}
-    for backend in ("cuda_baseline", "cuda"):
+    for backend in (baseline_backend, "cuda"):
         graphs[backend] = capture(lambda b=backend: paged_attention(*case, backend=b, validate=False), graph_repeats)
     samples = {name: [] for name in graphs}
     for iteration in range(repetitions):
@@ -53,6 +54,12 @@ def measure_pair(case, repetitions, graph_repeats):
             end.record()
             end.synchronize()
             samples[name].append(begin.elapsed_time(end) / graph_repeats)
+    # Validate captured outputs too; checking an eager call before capture is
+    # insufficient to qualify the measured path.
+    expected = paged_attention(*case, backend="torch")
+    for graph, output in graphs.values():
+        graph.replay()
+        torch.testing.assert_close(output, expected, atol=0.006 if output.dtype == torch.bfloat16 else 0.001, rtol=0.03)
     return {name: {"samples_ms": values, "median_ms": statistics.median(values),
                    "mean_ms": statistics.mean(values)} for name, values in samples.items()}
 
@@ -68,12 +75,14 @@ def main():
     parser.add_argument("--dtype", choices=["fp16", "bf16"], default="fp16")
     parser.add_argument("--repetitions", type=int, default=20)
     parser.add_argument("--graph-repeats", type=int, default=20)
+    parser.add_argument("--baseline-backend", choices=["cuda_baseline", "cuda_vector128"], default="cuda_baseline")
     parser.add_argument("--output", default="benchmarks/results/paged_sweep.json")
     args = parser.parse_args()
     if (len(args.batches) != len(args.contexts) or not args.kv_heads or args.heads % args.kv_heads
             or min([*args.block_sizes, *args.batches, *args.contexts, args.repetitions, args.graph_repeats]) <= 0):
         parser.error("positive paired shapes and divisible GQA heads are required")
     extension = load_cuda_extension()
+    source_start = source_metadata(extra_files=(__file__,))
     before = gpu_snapshot()
     torch.manual_seed(26)
     dtype = torch.float16 if args.dtype == "fp16" else torch.bfloat16
@@ -90,13 +99,22 @@ def main():
             expected = paged_attention(*case, backend="torch")
             actual = paged_attention(*case, backend="cuda")
             torch.testing.assert_close(actual, expected, atol=0.006 if dtype == torch.bfloat16 else 0.001, rtol=0.03)
-            timing = measure_pair(case, args.repetitions, args.graph_repeats)
+            timing = measure_pair(case, args.repetitions, args.graph_repeats, args.baseline_backend)
             row = {"batch": batch, "context": context, "block_size": block, "timing": timing,
                    "max_abs_error": (actual - expected).abs().max().item(),
-                   "paired_kernel_speedup": timing["cuda_baseline"]["median_ms"] / timing["cuda"]["median_ms"]}
+                   "input_sha256": [hashlib.sha256(t.cpu().contiguous().view(torch.uint8).numpy().tobytes()).hexdigest()
+                                    for t in case[:-1]],
+                   "paired_kernel_speedup": timing[args.baseline_backend]["median_ms"] / timing["cuda"]["median_ms"]}
             rows.append(row)
             print(json.dumps({key: value for key, value in row.items() if key != "timing"}), flush=True)
+    source_end = source_metadata(extra_files=(__file__,))
+    stable = source_start["source_tree_sha256"] == source_end["source_tree_sha256"]
+    if not stable:
+        for row in rows:
+            row["paired_kernel_speedup"] = None
     payload = {"scope": "CUDA Graph replay per operator; excludes Python dispatch and service",
+               "source_start": source_start, "source_end": source_end, "comparison_allowed": stable,
+               "correctness": "Eager and captured outputs checked against reference before accepting timing",
                "external_load_not_controlled": True, "gpu_before": before, "gpu_after": gpu_snapshot(),
                "os": platform.platform(), "torch": torch.__version__, "cuda": torch.version.cuda,
                "extension_sha256": hashlib.sha256(Path(extension.__file__).read_bytes()).hexdigest(),

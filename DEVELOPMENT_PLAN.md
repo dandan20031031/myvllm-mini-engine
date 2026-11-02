@@ -9,18 +9,21 @@
 - CUDA prefill直接读取paged历史KV；auto/math/flash/dandan仍逐请求dense attention。
 - 选择性LM head保留末行和必要Prefix边界；默认完整logits接口继续供reference/投机验证。
 - 单请求与batch decode Graph、固定metadata、独立scratch、投影融合。
+- D128、batch≤8、页表容量≤256 token的decode扩大QK点积并行度，保留原softmax/PV归约顺序；旧4-warp路径保留用于对拍。
 - 可选dandan FP16/W4A16后端、greedy prompt lookup、CLI与HTTP/SSE聊天子集。
 - runner、runtime和service的关闭与资源借用关系已经明确；prefill不在Graph内。
 
 FP16合批的严格逐元素KV阈值仍未通过。短生成一致和FP32对照仅支持舍入差异解释，不能宣称batch invariance完成；多请求探索时间不发布正式加速倍率。选择性LM head减少额外显存，但尚未观察到稳定延迟收益。原始观察、阈值与限制保留在[ragged摘要](reports/data/ragged_prefill_summary.json)。
 
+2026-11-02完成一轮数值门禁与小batch decode优化：诊断新增固定参考token的teacher-forced对拍、首个超限层/步与top-2 margin；拒绝了改变归约树并导致KV超限的初版。最终路径在固定FP16/BF16、两prompt×64输出的旧/新模型对照中，逐步logits与新KV完全一致；组件和完整生成收益分别记录。原FP16 ragged问题仍未解决，见[本轮验证](reports/VALIDATION_AND_BENCHMARKS.md)与[结构化记录](reports/data/decode_numerical_round_20261102.json)。
+
 ## 下一步优先级
 
 | 优先级 | 交付 | 验收条件 |
 |---|---|---|
-| P0 数值边界 | FP16不同batch/投影形状的逐层误差与KV预算；扩展teacher-forced、较长生成和任务质量 | 预先定义误差协议、记录首个分歧位置；失败保留诊断，不为生成性能倍率临时放宽阈值 |
+| P0 数值边界 | 已补teacher-forced与首处分歧定位；继续分析ragged从第12层索引起的误差，扩展长序列与任务质量 | 保持原严格阈值；32-token一致仍不算KV验收通过；失败保留诊断，不为生成性能倍率临时放宽阈值 |
 | P1 Prefill效率 | 在当前packed/paged路径上分析attention、GEMM、metadata与LM head成本，再决定分块、融合或访存优化 | B1完整行/B1选择行/packed选择行独立消融；同时验收共享页只读、不同历史长度、跨页与Prefix边界 |
-| P1 小batch decode | 根据2026-10-26与Mini的同输入组件对照，分析B1/B8 PagedAttention的并行度、访存和同步成本 | 保留当前CUDA baseline，先数值对拍再重复受控组件测量；最后验证完整模型TPOT，不把算子差距外推为引擎倍率 |
+| P1 小batch decode | 已完成单分区D128的QK并行化；继续依据profiling分析PV、长上下文及metadata成本 | 保留scalar/旧vector128对照；数值门禁先于性能，短上下文收益不外推长上下文或服务吞吐 |
 | P1 主对照 | Nano-vLLM和MiniVLLM共同离线adapter与固定工作量协议 | 同模型哈希、实际dtype、token IDs、输出预算、采样和KV预算；记录commit/dirty补丁、计时范围与逐次样本；缺平台条件标未测 |
 | P2 执行接口 | 减少CLI/Chat与batch路径在输入准备、采样、异常回收上的行为漂移 | 保留已支持的入口与结果语义；不为单卡项目引入多进程Executor或第二套调度框架 |
 | P2 后端契约 | 根据实际热点扩展dandan varlen/paged能力或形状路由 | 明确dense/paged、dtype/head_dim、suffix位置、workspace和Graph条件；库升级重新验收，不能将dense Flash称为paged/varlen集成 |
